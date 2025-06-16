@@ -1,0 +1,94 @@
+import asyncio
+from datetime import datetime, timezone
+from typing import Optional, Dict, Any
+from pymongo import ReturnDocument
+from pymongo.errors import PyMongoError
+from bson import ObjectId
+import logging
+from .database import db_manager
+from .models import TaskStatus, TaskModel, TaskProgress
+from .exceptions import TaskNotFoundError, TaskStateError
+
+class TaskManager:
+    """任务管理中心（兼容Pydantic V2）"""
+    
+    def __init__(self):
+        self.db = db_manager.get_database()
+        self.task_collection = self.db.tasks
+        self._ensure_indexes()
+        self.logger = logging.getLogger('task_manager')
+
+    def _ensure_indexes(self):
+        """确保必要的索引存在"""
+        try:
+            self.task_collection.create_index([
+                ('status', 1),
+                ('priority', -1),
+                ('created_at', 1)
+            ], background=True)
+            self.logger.debug("Database indexes verified")
+        except Exception as e:
+            self.logger.error("Index creation failed", exc_info=True)
+            raise
+
+    async def create_task(self, video_url: str, metadata: Optional[Dict] = None) -> str:
+        """创建新任务（使用model_dump替代dict）"""
+        task = TaskModel(
+            video_url=video_url,
+            metadata=metadata or {},
+            status=TaskStatus.PENDING
+        )
+        
+        try:
+            # 关键修改点：使用 model_dump() 替代 dict()
+            result = await self.task_collection.insert_one(task.model_dump())
+            self.logger.info(f"Created task {result.inserted_id}")
+            return str(result.inserted_id)
+        except Exception as e:
+            self.logger.error(f"Task creation failed: {str(e)}", exc_info=True)
+            raise TaskStateError("Failed to create task")
+
+    async def get_task(self, task_id: str) -> TaskModel:
+        """获取任务详情"""
+        try:
+            doc = await self.task_collection.find_one({'_id': ObjectId(task_id)})
+            if not doc:
+                raise TaskNotFoundError(f"Task {task_id} not found")
+            return TaskModel(**doc)
+        except PyMongoError as e:
+            self.logger.error(f"Database error: {str(e)}")
+            raise
+
+    async def update_progress(self, task_id: str, progress: TaskProgress) -> TaskModel:
+        """原子化更新任务进度"""
+        update_data = {
+            # 使用 model_dump() 替代 dict()
+            'progress': progress.model_dump(),
+            'updated_at': datetime.now(timezone.utc)
+        }
+        return await self._atomic_update(task_id, update_data)
+
+    async def _atomic_update(self, task_id: str, update: Dict[str, Any]) -> TaskModel:
+        """原子化更新操作（兼容Pydantic V2）"""
+        try:
+            updated = await self.task_collection.find_one_and_update(
+                {'_id': ObjectId(task_id)},
+                {'$set': update},
+                return_document=ReturnDocument.AFTER
+            )
+            if not updated:
+                raise TaskNotFoundError(f"Task {task_id} not found")
+            
+            self.logger.debug(f"Task {task_id} updated: {update.keys()}")
+            return TaskModel(**updated)
+        except PyMongoError as e:
+            self.logger.error(f"Update failed: {str(e)}")
+            raise TaskStateError("Failed to update task state")
+
+    async def list_tasks(self, status: Optional[TaskStatus] = None, limit: int = 100) -> list[TaskModel]:
+        """查询任务列表"""
+        query = {}
+        if status:
+            query['status'] = status.value
+        cursor = self.task_collection.find(query).sort('created_at', -1).limit(limit)
+        return [TaskModel(**doc) async for doc in cursor]
