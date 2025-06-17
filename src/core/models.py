@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Optional, Dict, Literal, Any
 from bson import ObjectId
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import BaseModel, Field, ConfigDict, computed_field, field_validator
 
 class TaskStatus(str, Enum):
     """任务主状态"""
@@ -56,10 +56,21 @@ TimestampKey = Literal[tuple(_TIMESTAMP_KEYS)]  # type: ignore
 
 class TaskModel(BaseModel):
     """完整的任务数据模型"""
-    id: str = Field(
-        default_factory=lambda: str(ObjectId()),
-        description="任务唯一ID"
+    id: Optional[str] = Field(
+        default=None,
+        alias="_id",
+        description="任务ID（MongoDB ObjectId的字符串形式）"
     )
+    
+    @field_validator("id", mode="before")
+    def convert_objectid(cls, v):
+        if v is None:
+            return None
+        if isinstance(v, ObjectId):
+            return str(v)
+        if isinstance(v, str) and ObjectId.is_valid(v):
+            return v
+        raise ValueError("Invalid ID format")
     video_url: str = Field(..., description="视频源URL")
     status: TaskStatus = Field(
         default=TaskStatus.PENDING,
@@ -76,6 +87,11 @@ class TaskModel(BaseModel):
     progress: Dict[TaskStage, Optional[TaskProgress]] = Field(
         default_factory=dict,
         description="各阶段进度记录"
+    )
+    priority: int = Field(
+        default=5,
+        ge=1, le=9,
+        description="任务优先级(1-9)"
     )
     timestamps: Dict[TimestampKey, Optional[datetime]] = Field(
         default_factory=lambda: dict.fromkeys(_TIMESTAMP_KEYS, None) | {

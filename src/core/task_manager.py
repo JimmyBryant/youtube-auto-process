@@ -15,8 +15,8 @@ class TaskManager:
     def __init__(self):
         self.db = db_manager.get_database()
         self.task_collection = self.db.tasks
-        self._ensure_indexes()
         self.logger = logging.getLogger('task_manager')
+        self._ensure_indexes()
 
     def _ensure_indexes(self):
         """确保必要的索引存在"""
@@ -31,17 +31,18 @@ class TaskManager:
             self.logger.error("Index creation failed", exc_info=True)
             raise
 
-    async def create_task(self, video_url: str, metadata: Optional[Dict] = None) -> str:
+    async def create_task(self, video_url: str, metadata: Optional[Dict] = None, priority: int = 1) -> str:
         """创建新任务（使用model_dump替代dict）"""
         task = TaskModel(
             video_url=video_url,
             metadata=metadata or {},
-            status=TaskStatus.PENDING
+            status=TaskStatus.PENDING,
+            priority=priority  # 添加priority字段
         )
         
         try:
             # 关键修改点：使用 model_dump() 替代 dict()
-            result = await self.task_collection.insert_one(task.model_dump())
+            result = self.task_collection.insert_one(task.model_dump())
             self.logger.info(f"Created task {result.inserted_id}")
             return str(result.inserted_id)
         except Exception as e:
@@ -51,7 +52,7 @@ class TaskManager:
     async def get_task(self, task_id: str) -> TaskModel:
         """获取任务详情"""
         try:
-            doc = await self.task_collection.find_one({'_id': ObjectId(task_id)})
+            doc = self.task_collection.find_one({'_id': ObjectId(task_id)})
             if not doc:
                 raise TaskNotFoundError(f"Task {task_id} not found")
             return TaskModel(**doc)
@@ -66,18 +67,18 @@ class TaskManager:
             'progress': progress.model_dump(),
             'updated_at': datetime.now(timezone.utc)
         }
-        return await self._atomic_update(task_id, update_data)
+        return self._atomic_update(task_id, update_data)
 
     async def _atomic_update(self, task_id: str, update: Dict[str, Any]) -> TaskModel:
         """原子化更新操作（兼容Pydantic V2）"""
         try:
-            updated = await self.task_collection.find_one_and_update(
+            updated = self.task_collection.find_one_and_update(
                 {'_id': ObjectId(task_id)},
                 {'$set': update},
                 return_document=ReturnDocument.AFTER
             )
             if not updated:
-                raise TaskNotFoundError(f"Task {task_id} not found")
+                raise TaskNotFoundError(f"Task {task_id} not found",task_id)
             
             self.logger.debug(f"Task {task_id} updated: {update.keys()}")
             return TaskModel(**updated)
@@ -91,4 +92,14 @@ class TaskManager:
         if status:
             query['status'] = status.value
         cursor = self.task_collection.find(query).sort('created_at', -1).limit(limit)
-        return [TaskModel(**doc) async for doc in cursor]
+        return [TaskModel(**doc) for doc in cursor]
+    async def update_task_status(self, task_id: str, status: TaskStatus, error: Optional[str] = None) -> TaskModel:
+        """更新任务状态"""
+        update_data = {
+            'status': status.value,
+            'updated_at': datetime.now(timezone.utc)
+        }
+        if error:
+            update_data['error'] = error
+        
+        return await self._atomic_update(task_id, update_data)

@@ -3,7 +3,8 @@ from pathlib import Path
 import json
 from typing import Optional
 import logging
-from core import TaskManager, TaskModel
+from src.core.models import TaskModel
+from src.core.task_manager import TaskManager
 
 class CommentScraper:
     """基于Playwright的智能评论爬取"""

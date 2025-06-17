@@ -2,7 +2,8 @@ import whisper
 from pathlib import Path
 from typing import Optional
 import logging
-from core import TaskManager, TaskModel
+from src.core.models import TaskModel
+from src.core.task_manager import TaskManager
 
 class AudioTranscriber:
     """基于Whisper的智能语音转写"""

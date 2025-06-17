@@ -2,7 +2,8 @@ from playwright.async_api import async_playwright
 from pathlib import Path
 from typing import Optional
 import logging
-from core import TaskManager, TaskModel
+from src.core.models import TaskModel
+from src.core.task_manager import TaskManager
 
 class VideoPublisher:
     """多平台视频发布控制器"""

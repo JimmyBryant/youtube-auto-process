@@ -4,7 +4,8 @@ from typing import Optional
 import logging
 from tqdm import tqdm
 from yt_dlp import YoutubeDL
-from core import TaskManager, TaskModel
+from src.core.models import TaskModel
+from src.core.task_manager import TaskManager
 
 class VideoDownloader:
     """支持4K/HD的智能视频下载器"""

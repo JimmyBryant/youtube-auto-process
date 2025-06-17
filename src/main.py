@@ -14,14 +14,10 @@ from typing import Optional, Dict
 from pathlib import Path
 from datetime import datetime, timezone
 from dotenv import load_dotenv
-from src import (
-    TaskManager,
-    TaskModel,
-    VideoProcessor,
-    TaskScheduler,
-    __version__,
-    get_version
-)
+from src.core.models import TaskModel
+from src.core.task_manager import TaskManager
+from src.core.task_scheduler import TaskScheduler
+from src import __version__, get_version
 
 # 环境配置加载
 load_dotenv(Path(__file__).parent.parent / 'config' / 'dev.env')
@@ -62,7 +58,6 @@ class TaskCLI:
         task_data = {
             "video_url": video_url,
             "priority": priority,
-            "created_at": datetime.now(timezone.utc).isoformat(),
             "metadata": {
                 "source": "cli",
                 "quality": "1080p"  # 默认配置
@@ -71,7 +66,7 @@ class TaskCLI:
         
         try:
             print("🔄 正在创建任务...")
-            task_id = await manager.create_task(TaskModel(**task_data))
+            task_id = await manager.create_task(**task_data)
             print(f"✅ 任务创建成功 | ID: {task_id}")
             return task_id
         except Exception as e:
@@ -94,12 +89,12 @@ class TaskCLI:
                 "processing": "⚙️",
                 "completed": "✅",
                 "failed": "❌"
-            }.get(task.status.value, "❓")
+            }.get(task.status, "❓")
             
             print(
-                f"{status_icon} [{task.id[:8]}] {task.status.value.upper()}\n"
+                f"{status_icon} [{task.id[:8]}] {task.status.upper()}\n"
                 f"   URL: {task.video_url}\n"
-                f"   优先级: {task.priority} | 创建时间: {task.created_at}\n"
+                f"   优先级: {task.priority} | 创建时间: {task.timestamps['created_at']}\n"
                 f"   {'-'*40}"
             )
 
