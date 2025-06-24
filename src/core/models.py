@@ -1,52 +1,63 @@
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Optional, Dict, Literal, Any
+from typing import Optional, Dict, Literal, Any, List
 from bson import ObjectId
 from pydantic import BaseModel, Field, ConfigDict, computed_field, field_validator
+from pathlib import Path
 
 class TaskStatus(str, Enum):
-    """任务主状态"""
-    PENDING = "pending"          # 等待处理
-    PROCESSING = "processing"    # 处理中（有子状态）
-    PAUSED = "paused"            # 已暂停
-    COMPLETED = "completed"      # 已完成
-    FAILED = "failed"            # 已失败
-    CANCELLED = "cancelled"      # 已取消
+    """任务主状态枚举"""
+    PENDING = "pending"
+    PROCESSING = "processing"
+    PAUSED = "paused"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+class StageStatus(str, Enum):
+    """阶段状态枚举"""
+    PENDING = "pending"
+    PROCESSING = "processing"
+    COMPLETED = "completed"
+    FAILED = "failed"
 
 class TaskStage(str, Enum):
-    """视频处理全流程子状态"""
-    DOWNLOADING = "downloading"              # 视频下载中
-    COMMENT_FETCHING = "comment_fetching"    # 获取视频评论
-    AUDIO_EXTRACTING = "audio_extracting"    # 提取音频流
-    AUDIO_ENHANCING = "audio_enhancing"      # 音频降噪/增强
-    TRANSCRIBING = "transcribing"            # 语音转文字
-    TRANSLATING = "translating"              # 文本翻译
-    SUBTITLE_GENERATING = "subtitle_generating" # 字幕生成
-    VIDEO_ANALYZING = "video_analyzing"      # 视频内容分析
-    EFFECT_ADDING = "effect_adding"          # 特效/滤镜添加
-    CLIP_EDITING = "clip_editing"            # 片段剪辑
-    SYNTHESIZING = "synthesizing"            # 最终合成渲染
-    QUALITY_CHECK = "quality_check"          # 成品质量检测
-    PUBLISHING = "publishing"                # 平台发布
-    MANUAL_REVIEW = "manual_review"          # 人工审核
+    """任务阶段枚举"""
+    DOWNLOADING = "downloading"
+    TRANSCRIBING = "transcribing"
+    TRANSLATING = "translating"
+    COMMENT_FETCHING = "comment_fetching"
+    COMMENT_PROCESSING = "comment_processing"
+    SYNTHESIZING = "synthesizing"
+    PUBLISHING = "publishing"
 
 class ProcessingType(str, Enum):
-    """视频分析的具体类型"""
-    OBJECT_DETECTION = "object_detection"    # 物体识别
-    SCENE_CLASSIFICATION = "scene_class"    # 场景分类
-    EMOTION_ANALYSIS = "emotion_analysis"    # 情绪分析
-    KEYFRAME_EXTRACTION = "keyframe_extract" # 关键帧提取
+    """处理类型枚举"""
+    OBJECT_DETECTION = "object_detection"
+    SCENE_CLASSIFICATION = "scene_classification"
+    EMOTION_ANALYSIS = "emotion_analysis"
 
 class TaskProgress(BaseModel):
-    """增强版进度跟踪"""
-    current: int = Field(..., ge=0, description="当前进度值")
-    total: int = Field(..., gt=0, description="总进度值")
-    speed: Optional[float] = Field(None, description="处理速度（单位/秒）")
-    remaining: Optional[float] = Field(None, description="预计剩余时间（秒）")
-    message: Optional[str] = Field(None, description="当前状态描述")
-    extra: Optional[Dict[str, Any]] = Field(None, description="扩展数据")
+    """任务进度详情"""
+    current: int = Field(..., ge=0)
+    total: int = Field(..., gt=0)
+    speed: Optional[float] = None
+    remaining: Optional[float] = None
+    message: Optional[str] = None
+    extra: Optional[Dict[str, Any]] = None
 
-# 预生成所有时间戳键
+class StageProgress(BaseModel):
+    """阶段进度详情（包含输出文件路径）"""
+    status: StageStatus = Field(default=StageStatus.PENDING)
+    started_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    progress: Optional[TaskProgress] = None
+    message: Optional[str] = None
+    error: Optional[str] = None
+    output_files: Dict[str, str] = Field(default_factory=dict)  # 关键修改：存储文件路径
+    output_data: Optional[Any] = None
+
+# 预生成时间戳键
 _TIMESTAMP_KEYS = [
     "created_at", "started_at", "completed_at",
     *(f"{stage.value}_start" for stage in TaskStage),
@@ -55,15 +66,121 @@ _TIMESTAMP_KEYS = [
 TimestampKey = Literal[tuple(_TIMESTAMP_KEYS)]  # type: ignore
 
 class TaskModel(BaseModel):
-    """完整的任务数据模型"""
-    id: Optional[str] = Field(
-        default=None,
-        alias="_id",
-        description="任务ID（MongoDB ObjectId的字符串形式）"
-    )
+    """完整的任务数据模型（优化版）"""
     
+    # --- 核心字段 ---
+    id: Optional[str] = Field(None, alias="_id")
+    video_url: str = Field(...)
+    status: TaskStatus = Field(default=TaskStatus.PENDING)
+    stage: Optional[TaskStage] = None
+    processing_type: Optional[ProcessingType] = None
+    priority: int = Field(default=5, ge=1, le=9)
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+    error: Optional[str] = None
+    
+    # --- 阶段管理 ---
+    stage_progress: Dict[TaskStage, StageProgress] = Field(default_factory=dict)
+    timestamps: Dict[TimestampKey, Optional[datetime]] = Field(
+        default_factory=lambda: dict.fromkeys(_TIMESTAMP_KEYS, None) | {
+            "created_at": datetime.now(timezone.utc)
+        }
+    )
+
+    # --- 计算方法 ---
+    @computed_field
+    @property
+    def downloaded_video_path(self) -> Optional[str]:
+        """获取下载的视频路径（从阶段数据中读取）"""
+        return self.get_stage_file(TaskStage.DOWNLOADING, "video_path")
+
+    @computed_field
+    @property
+    def downloaded_thumbnail_path(self) -> Optional[str]:
+        """获取下载的封面路径（从阶段数据中读取）"""
+        return self.get_stage_file(TaskStage.DOWNLOADING, "thumbnail_path")
+
+    @computed_field
+    @property
+    def subtitle_path(self) -> Optional[str]:
+        """获取生成的字幕路径"""
+        return self.get_stage_file(TaskStage.TRANSCRIBING, "subtitle_path")
+
+    # --- 核心方法 ---
+    def get_stage_file(self, stage: TaskStage, file_key: str) -> Optional[str]:
+        """统一获取阶段输出文件路径"""
+        if stage in self.stage_progress:
+            return self.stage_progress[stage].output_files.get(file_key)
+        return None
+
+    def start_stage(self, stage: TaskStage, processing_type: Optional[ProcessingType] = None):
+        """开始处理阶段"""
+        if stage == TaskStage.VIDEO_ANALYZING and not processing_type:
+            raise ValueError("Video analysis requires processing_type")
+            
+        self.status = TaskStatus.PROCESSING
+        self.stage = stage
+        self.processing_type = processing_type
+        
+        # 初始化阶段进度
+        if stage not in self.stage_progress:
+            self.stage_progress[stage] = StageProgress()
+        
+        # 更新状态
+        self.stage_progress[stage].status = StageStatus.PROCESSING
+        self.stage_progress[stage].started_at = datetime.now(timezone.utc)
+        
+        # 更新时间戳
+        self.timestamps[f"{stage.value}_start"] = datetime.now(timezone.utc)
+        if not self.timestamps["started_at"]:
+            self.timestamps["started_at"] = datetime.now(timezone.utc)
+
+    def end_stage(self, output_files: Dict[str, str]):
+        """成功完成阶段"""
+        if not self.stage:
+            raise ValueError("No active stage to end")
+            
+        self.stage_progress[self.stage].status = StageStatus.COMPLETED
+        self.stage_progress[self.stage].completed_at = datetime.now(timezone.utc)
+        self.stage_progress[self.stage].output_files = output_files  # 存储输出路径
+        
+        self.timestamps[f"{self.stage.value}_end"] = datetime.now(timezone.utc)
+        self.stage = None
+        self.processing_type = None
+
+    def fail_stage(self, error: str):
+        """标记阶段失败"""
+        if not self.stage:
+            raise ValueError("No active stage to fail")
+            
+        self.stage_progress[self.stage].status = StageStatus.FAILED
+        self.stage_progress[self.stage].error = error
+        self.stage_progress[self.stage].completed_at = datetime.now(timezone.utc)
+        
+        self.timestamps[f"{self.stage.value}_end"] = datetime.now(timezone.utc)
+        self.stage = None
+        self.processing_type = None
+
+    def set_failed(self, error: str):
+        """标记整个任务失败"""
+        self.status = TaskStatus.FAILED
+        self.error = error
+        self.timestamps["completed_at"] = datetime.now(timezone.utc)
+        if self.stage:
+            self.fail_stage(error)
+
+    # --- 配置 ---
+    model_config = ConfigDict(
+        json_encoders={
+            datetime: lambda v: v.isoformat(),
+            ObjectId: lambda v: str(v)
+        },
+        use_enum_values=True,
+        arbitrary_types_allowed=True
+    )
+
     @field_validator("id", mode="before")
     def convert_objectid(cls, v):
+        """ID字段验证器"""
         if v is None:
             return None
         if isinstance(v, ObjectId):
@@ -71,95 +188,3 @@ class TaskModel(BaseModel):
         if isinstance(v, str) and ObjectId.is_valid(v):
             return v
         raise ValueError("Invalid ID format")
-    video_url: str = Field(..., description="视频源URL")
-    status: TaskStatus = Field(
-        default=TaskStatus.PENDING,
-        description="任务主状态"
-    )
-    stage: Optional[TaskStage] = Field(
-        None,
-        description="当前处理子状态"
-    )
-    processing_type: Optional[ProcessingType] = Field(
-        None,
-        description="视频分析时的具体类型"
-    )
-    progress: Dict[TaskStage, Optional[TaskProgress]] = Field(
-        default_factory=dict,
-        description="各阶段进度记录"
-    )
-    priority: int = Field(
-        default=5,
-        ge=1, le=9,
-        description="任务优先级(1-9)"
-    )
-    timestamps: Dict[TimestampKey, Optional[datetime]] = Field(
-        default_factory=lambda: dict.fromkeys(_TIMESTAMP_KEYS, None) | {
-            "created_at": datetime.now(timezone.utc)
-        },
-        description="各阶段时间记录"
-    )
-    metadata: Dict[str, Any] = Field(
-        default_factory=dict,
-        description="任务元数据"
-    )
-    error: Optional[str] = Field(
-        None,
-        description="错误信息"
-    )
-
-    def start_stage(
-        self,
-        stage: TaskStage,
-        processing_type: Optional[ProcessingType] = None
-    ):
-        """开始处理阶段（带类型校验）"""
-        if stage == TaskStage.VIDEO_ANALYZING and not processing_type:
-            raise ValueError("视频分析阶段必须指定processing_type")
-        
-        self.status = TaskStatus.PROCESSING
-        self.stage = stage
-        self.processing_type = processing_type
-        self.timestamps[f"{stage.value}_start"] = datetime.now(timezone.utc)
-        
-        if not self.timestamps["started_at"]:
-            self.timestamps["started_at"] = datetime.now(timezone.utc)
-
-    def end_stage(self):
-        """结束当前阶段"""
-        if not self.stage:
-            raise ValueError("没有正在进行的阶段")
-        
-        self.timestamps[f"{self.stage.value}_end"] = datetime.now(timezone.utc)
-        self.stage = None
-        self.processing_type = None
-
-    def set_failed(self, error_msg: str):
-        """标记任务失败"""
-        self.status = TaskStatus.FAILED
-        self.error = error_msg
-        self.timestamps["completed_at"] = datetime.now(timezone.utc)
-        if self.stage:
-            self.end_stage()
-
-    model_config = ConfigDict(
-        json_encoders={
-            datetime: lambda v: v.isoformat(),
-            ObjectId: lambda v: str(v)
-        },
-        use_enum_values=True,
-        arbitrary_types_allowed=True,
-        json_schema_extra={
-            "example": {
-                "video_url": "https://youtu.be/example",
-                "status": "pending",
-                "metadata": {
-                    "resolution": "1080p",
-                    "duration": 120
-                }
-            }
-        }
-    )
-
-# 辅助类型（与TimestampKey保持一致）
-TaskTimestamps = Dict[TimestampKey, Optional[datetime]]

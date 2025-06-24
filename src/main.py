@@ -10,6 +10,7 @@
 
 import asyncio
 import argparse
+import sys
 from typing import Optional, Dict
 from pathlib import Path
 from datetime import datetime, timezone
@@ -100,15 +101,43 @@ class TaskCLI:
 
 async def start_service():
     """启动任务处理服务 (带状态监控)"""
-    scheduler = TaskScheduler()
-    print("🚀 启动任务处理服务... (Ctrl+C 停止)")
     try:
-        async with asyncio.TaskGroup() as tg:
-            tg.create_task(scheduler.start())
-            tg.create_task(scheduler.monitor_status())
-    except* Exception as ex:
-        print(f"⚠️ 服务异常终止: {ex}")
-
+        scheduler = TaskScheduler()
+        print("🚀🚀 启动任务处理服务... (Ctrl+C 停止)")
+        
+        try:
+            async with asyncio.TaskGroup() as tg:
+                tg.create_task(scheduler.start())
+                tg.create_task(scheduler.monitor_status())
+        except* Exception as ex:
+            # 更详细的错误处理
+            if hasattr(ex, 'exceptions'):
+                errors = ex.exceptions
+                print(f"⚠️ 服务异常 (共 {len(errors)} 个错误):")
+                for i, error in enumerate(errors, 1):
+                    print(f"\n错误 #{i}:")
+                    print(f"  类型: {type(error).__name__}")
+                    print(f"  详细信息: {str(error)}")
+                    if hasattr(error, '__traceback__'):
+                        import traceback
+                        traceback.print_exception(type(error), error, error.__traceback__)
+            else:
+                print(f"⚠️ 服务异常: {str(ex)}")
+            
+            # 将错误信息存储在scheduler实例中
+            scheduler.error_info = {
+                'type': type(error).__name__,
+                'message': str(error)
+            }
+            
+    except Exception as e:
+        print(f"❌❌ 服务启动失败: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return False
+    
+    # 通过检查scheduler实例的error_info属性判断是否有错误
+    return not hasattr(scheduler, 'error_info')
 def parse_args():
     """增强版命令行参数解析"""
     parser = argparse.ArgumentParser(
@@ -151,7 +180,9 @@ async def main():
     
     try:
         if args.command == 'run':
-            await start_service()
+            success = await start_service()
+            if not success:
+                sys.exit(1)  # 非零退出码表示错误
         elif args.command == 'create':
             await TaskCLI.create_task(args.url, args.priority)
         elif args.command == 'list':

@@ -10,7 +10,7 @@ __all__ = [
     "VideoPublisher"
 ]
 
-from .downloader import VideoDownloader
+from .video_downloader import VideoDownloader
 from .transcriber import AudioTranscriber
 from .translator import SubtitleTranslator
 from .scraper import CommentScraper
