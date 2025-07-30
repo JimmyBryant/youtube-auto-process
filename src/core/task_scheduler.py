@@ -9,7 +9,7 @@ import uuid
 from .task_manager import TaskManager
 from .models import TaskStatus, TaskStage, StageStatus, TaskModel, ProcessingType
 from src.modules.video_downloader import download_video
-from src.modules.subtitle_generator import generate_subtitles
+from src.modules.transcriber import AudioTranscriber
 from src.modules.translation_service import translate_subtitles
 from src.modules.comment_processor import fetch_comments, process_comments
 from src.modules.video_editor import edit_video
@@ -22,7 +22,8 @@ class TaskScheduler:
     
     def __init__(self, 
                  max_concurrent_tasks: int = 3,
-                 temp_base_dir: str = "/tmp/video_processing"):
+                 temp_base_dir: str = "/tmp/video_processing",
+                 cookie_file: Path = None):
         try:
             self.task_manager = TaskManager()
             self.max_concurrent_tasks = max_concurrent_tasks
@@ -30,11 +31,11 @@ class TaskScheduler:
             self._stop_event = asyncio.Event()
             self.temp_base_dir = Path(temp_base_dir)
             self.temp_base_dir.mkdir(parents=True, exist_ok=True)
-            
+            self.cookie_file = cookie_file
             # 阶段处理器映射
             self.stage_handlers = {
-                TaskStage.DOWNLOADING: self._handle_downloading,
-                # TaskStage.TRANSCRIBING: self._handle_transcribing,
+                TaskStage.DOWNLOADING: lambda task, task_dir: self._handle_downloading(task, task_dir, self.cookie_file),
+                TaskStage.TRANSCRIBING: self._handle_transcribing,
                 # TaskStage.TRANSLATING: self._handle_translating,
                 # TaskStage.COMMENT_FETCHING: self._handle_comment_fetching,
                 # TaskStage.COMMENT_PROCESSING: self._handle_comment_processing,
@@ -45,7 +46,7 @@ class TaskScheduler:
             # 阶段执行顺序
             self.stage_sequence = [
                 TaskStage.DOWNLOADING,
-                # TaskStage.TRANSCRIBING,
+                TaskStage.TRANSCRIBING,
                 # TaskStage.TRANSLATING,
                 # TaskStage.COMMENT_FETCHING,
                 # TaskStage.COMMENT_PROCESSING,
@@ -91,33 +92,42 @@ class TaskScheduler:
                 await asyncio.sleep(5)  # 出错后等待更长时间
     async def _process_task(self, task: TaskModel):
         task_dir = None
-        """处理单个任务"""
+        """处理单个任务，阶段失败自动重试3次"""
         try:
             # 创建唯一临时目录
             task_dir = self.temp_base_dir / f"task_{task.id}_{uuid.uuid4().hex[:6]}"
             task_dir.mkdir(exist_ok=True)
             # 更新任务状态为处理中
             await self.task_manager.update_task_status(task.id, TaskStatus.PROCESSING)
-            
+
             # 按阶段顺序处理任务
             for stage in self.stage_sequence:
-                success, outputs = await self.stage_handlers[stage](task, task_dir)
-                if not success:
+                max_retries = 3
+                for attempt in range(1, max_retries + 1):
+                    success, outputs = await self.stage_handlers[stage](task, task_dir)
+                    if success:
+                        # 更新阶段状态
+                        await self.task_manager.update_stage_status(
+                            task_id=task.id,
+                            stage=stage,
+                            status=StageStatus.COMPLETED,
+                            output_files=outputs
+                        )
+                        break
+                    else:
+                        logger.warning(f"阶段 {stage} 第 {attempt} 次执行失败，任务ID: {task.id}")
+                        if attempt < max_retries:
+                            await asyncio.sleep(3)  # 可根据需要调整重试间隔
+                else:
+                    # 3次都失败
+                    logger.error(f"阶段 {stage} 连续3次失败，任务ID: {task.id}，任务终止")
                     await self.task_manager.update_task_status(task.id, TaskStatus.FAILED)
                     return
-                
-                # 更新阶段状态
-                await self.task_manager.update_stage_status(
-                    task_id=task.id,
-                    stage=stage,
-                    status=StageStatus.COMPLETED,
-                    output_files=outputs
-                )
-            
+
             # 所有阶段完成
             await self.task_manager.update_task_status(task.id, TaskStatus.COMPLETED)
             logger.info(f"🎉 Task {task.id} completed successfully")
-            
+
         except Exception as e:
             logger.error(f"❌ Task {task.id} failed: {str(e)}")
             await self.task_manager.update_task_status(task.id, TaskStatus.FAILED, error=str(e))
@@ -137,7 +147,7 @@ class TaskScheduler:
             except Exception as e:
                 logger.error(f"⚠️ Status monitor error: {str(e)}")
                 await asyncio.sleep(30) 
-    async def _handle_downloading(self, task: TaskModel, task_dir: str) -> Tuple[bool, Dict[str, str]]:
+    async def _handle_downloading(self, task: TaskModel, task_dir: str, cookie_file: Path = None) -> Tuple[bool, Dict[str, str]]:
         """处理视频下载阶段"""
         logger.info(f"📥📥 Handling downloading for task {task.id}")
         
@@ -154,9 +164,19 @@ class TaskScheduler:
                 stage=TaskStage.DOWNLOADING,
                 status=StageStatus.PROCESSING
             )
-            
+            # 优先使用传入的 cookie_file，其次环境变量和配置文件
+            import os
+            final_cookie_file = cookie_file
+            if final_cookie_file is None:
+                cookie_path = os.getenv('YT_COOKIE_PATH')
+                if not cookie_path:
+                    from dotenv import dotenv_values
+                    config_path = Path(__file__).parent.parent.parent / 'config' / 'dev.env'
+                    config = dotenv_values(config_path)
+                    cookie_path = config.get('YT_COOKIE_PATH')
+                final_cookie_file = Path(cookie_path) if cookie_path else None
             # 下载视频和封面
-            video_path, thumbnail_path = await download_video(task.video_url, task_dir)
+            video_path, thumbnail_path = await download_video(task.video_url, task_dir, final_cookie_file)
             
             outputs = {
                 "video_path": str(video_path),
@@ -175,40 +195,27 @@ class TaskScheduler:
             return False, {}
 
     async def _handle_transcribing(self, task: TaskModel) -> Tuple[bool, Dict[str, str]]:
-        """处理字幕生成阶段"""
+        """处理字幕生成阶段（whisperx medium）"""
         logger.info(f"🔤🔤 Handling transcribing for task {task.id}")
-        
         stage_progress = task.stage_progress.get(TaskStage.TRANSCRIBING)
         if stage_progress.status == StageStatus.COMPLETED:
             logger.info(f"⏩⏩⏩ Skipping already completed transcribing for task {task.id}")
             return True, stage_progress.output_files
-        
         # 检查前置阶段是否完成
         download_progress = task.stage_progress.get(TaskStage.DOWNLOADING)
         if download_progress.status != StageStatus.COMPLETED:
             raise RuntimeError(f"Download not completed for task {task.id}, can't transcribe")
-        
         try:
-            # 开始阶段
             await self.task_manager.update_stage_status(
                 task_id=task.id,
                 stage=TaskStage.TRANSCRIBING,
                 status=StageStatus.PROCESSING
             )
-            
-            # 获取视频路径
             video_path = Path(download_progress.output_files["video_path"])
-            
-            # 生成字幕
-            task_dir = Path(task.temp_dir)
-            subtitle_path = await generate_subtitles(video_path, task_dir)
-            
-            # 返回输出文件信息
-            outputs = {
-                "subtitle_path": str(subtitle_path)
-            }
-            
-            return True, outputs
+            transcriber = AudioTranscriber(model_size="medium", device="cpu")
+            srt_path = await transcriber.transcribe(task.id, video_path)
+            outputs = {"subtitle_path": str(srt_path)} if srt_path else {}
+            return (srt_path is not None), outputs
         except Exception as e:
             logger.error(f"❌❌ Transcribing failed for task {task.id}: {str(e)}")
             await self.task_manager.update_stage_status(

@@ -10,6 +10,7 @@ from .models import TaskStatus, TaskModel, TaskProgress, TaskStage, StageStatus,
 from .exceptions import TaskNotFoundError, TaskStateError
 
 class TaskManager:
+
     """任务管理中心（兼容Pydantic V2）"""
     
     def __init__(self):
@@ -141,3 +142,17 @@ class TaskManager:
             query['status'] = status.value
         cursor = self.task_collection.find(query).sort('created_at', -1).limit(limit)
         return [TaskModel(**doc) for doc in cursor]
+
+    async def delete_task(self, task_id: str) -> bool:
+        """删除任务"""
+        try:
+            result = self.task_collection.delete_one({'_id': ObjectId(task_id)})
+            if result.deleted_count == 1:
+                self.logger.info(f"Deleted task {task_id}")
+                return True
+            else:
+                self.logger.warning(f"Task {task_id} not found for deletion")
+                return False
+        except Exception as e:
+            self.logger.error(f"Delete task failed: {str(e)}")
+            return False

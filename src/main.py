@@ -24,6 +24,45 @@ from src import __version__, get_version
 load_dotenv(Path(__file__).parent.parent / 'config' / 'dev.env')
 
 class TaskCLI:
+    @staticmethod
+    async def delete_task(task_id: str):
+        """删除指定任务"""
+        manager = TaskManager()
+        ok = await manager.delete_task(task_id)
+        if ok:
+            print(f"✅ 任务已删除 | ID: {task_id}")
+        else:
+            print(f"❌ 未找到或删除失败 | ID: {task_id}")
+    @staticmethod
+    async def show_tasks_detail(n: int):
+        """显示前 n 个任务的所有阶段详情"""
+        manager = TaskManager()
+        tasks = await manager.list_tasks(limit=n)
+        if not tasks:
+            print("ℹ️ 没有找到任务")
+            return
+        for idx, task in enumerate(tasks, 1):
+            print(f"\n任务 #{idx} | ID: {task.id}")
+            print(f"  状态: {task.status} | 优先级: {task.priority}")
+            print(f"  URL: {task.video_url}")
+            print(f"  创建时间: {task.timestamps.get('created_at')}")
+            print(f"  阶段进度:")
+            for stage in task.stage_progress:
+                progress = task.stage_progress[stage]
+                # StageProgress 是 pydantic model，直接用属性
+                stage_status = getattr(progress, 'status', '-')
+                started = getattr(progress, 'started_at', None)
+                completed = getattr(progress, 'completed_at', None)
+                print(f"    - {stage}: {stage_status}")
+                if started:
+                    print(f"      开始: {started}")
+                if completed:
+                    print(f"      完成: {completed}")
+                if hasattr(progress, 'output_files') and progress.output_files:
+                    print(f"      输出文件: {progress.output_files}")
+                if getattr(progress, 'error', None):
+                    print(f"      错误: {progress.error}")
+            print(f"  {'='*40}")
     """任务命令行交互处理器"""
     
     @staticmethod
@@ -99,12 +138,11 @@ class TaskCLI:
                 f"   {'-'*40}"
             )
 
-async def start_service():
+async def start_service(cookie_file=None):
     """启动任务处理服务 (带状态监控)"""
     try:
-        scheduler = TaskScheduler()
+        scheduler = TaskScheduler(cookie_file=Path(cookie_file) if cookie_file else None)
         print("🚀🚀 启动任务处理服务... (Ctrl+C 停止)")
-        
         try:
             async with asyncio.TaskGroup() as tg:
                 tg.create_task(scheduler.start())
@@ -123,35 +161,32 @@ async def start_service():
                         traceback.print_exception(type(error), error, error.__traceback__)
             else:
                 print(f"⚠️ 服务异常: {str(ex)}")
-            
             # 将错误信息存储在scheduler实例中
             scheduler.error_info = {
                 'type': type(error).__name__,
                 'message': str(error)
             }
-            
     except Exception as e:
         print(f"❌❌ 服务启动失败: {str(e)}")
         import traceback
         traceback.print_exc()
         return False
-    
     # 通过检查scheduler实例的error_info属性判断是否有错误
     return not hasattr(scheduler, 'error_info')
 def parse_args():
-    """增强版命令行参数解析"""
     parser = argparse.ArgumentParser(
         description="YouTube视频自动化处理系统",
         formatter_class=argparse.RawTextHelpFormatter
     )
     parser.add_argument('-v', '--version', action='version', 
                        version=f"YT Processor v{get_version()}")
-    
     subparsers = parser.add_subparsers(dest='command', title='可用命令')
-    
+
     # run 命令
     run_parser = subparsers.add_parser('run', help='启动处理服务')
-    
+    run_parser.add_argument('--cookie', dest='cookie_file', type=str, default=None,
+                           help='指定 cookie 文件路径（优先级最高）')
+
     # create 命令增强
     create_parser = subparsers.add_parser(
         'create', 
@@ -164,7 +199,7 @@ def parse_args():
     create_parser.add_argument('--quality', default='1080p',
                               choices=['480p', '720p', '1080p', '4K'],
                               help='视频质量要求')
-    
+
     # list 命令增强
     list_parser = subparsers.add_parser('list', help='查询任务列表')
     list_parser.add_argument('-s', '--status', 
@@ -172,7 +207,15 @@ def parse_args():
                             help='按状态过滤')
     list_parser.add_argument('-l', '--limit', type=int, default=10,
                             help='显示数量限制 (默认: 10)')
-    
+
+    # details 命令
+    details_parser = subparsers.add_parser('details', help='查询前 n 个任务的所有阶段详情')
+    details_parser.add_argument('n', type=int, help='要查询的任务数量')
+
+    # delete 命令
+    delete_parser = subparsers.add_parser('delete', help='删除指定任务')
+    delete_parser.add_argument('task_id', help='任务ID')
+
     return parser.parse_args()
 
 async def main():
@@ -180,18 +223,25 @@ async def main():
     
     try:
         if args.command == 'run':
-            success = await start_service()
+            cookie_file = args.cookie_file if hasattr(args, 'cookie_file') else None
+            success = await start_service(cookie_file=cookie_file)
             if not success:
                 sys.exit(1)  # 非零退出码表示错误
         elif args.command == 'create':
             await TaskCLI.create_task(args.url, args.priority)
         elif args.command == 'list':
             await TaskCLI.list_tasks(args.status, args.limit)
+        elif args.command == 'details':
+            await TaskCLI.show_tasks_detail(args.n)
+        elif args.command == 'delete':
+            await TaskCLI.delete_task(args.task_id)
         else:
             print("""\n请使用以下有效命令：
   run       启动处理服务
   create    创建新任务 (需URL参数)
   list      查看任务列表
+  details   查看前 n 个任务的所有阶段详情
+  delete    删除指定任务 (需任务ID)
             """)
     except (ValueError, RuntimeError) as e:
         print(f"\n错误: {str(e)}")
