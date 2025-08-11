@@ -63,7 +63,25 @@ _TIMESTAMP_KEYS = [
     *(f"{stage.value}_start" for stage in TaskStage),
     *(f"{stage.value}_end" for stage in TaskStage)
 ]
-TimestampKey = Literal[tuple(_TIMESTAMP_KEYS)]  # type: ignore
+TimestampKey = Literal[
+    "created_at",
+    "started_at",
+    "completed_at",
+    "downloading_start",
+    "transcribing_start",
+    "translating_start",
+    "comment_fetching_start",
+    "comment_processing_start",
+    "synthesizing_start",
+    "publishing_start",
+    "downloading_end",
+    "transcribing_end",
+    "translating_end",
+    "comment_fetching_end",
+    "comment_processing_end",
+    "synthesizing_end",
+    "publishing_end"
+]
 
 class TaskModel(BaseModel):
     """完整的任务数据模型（优化版）"""
@@ -77,6 +95,7 @@ class TaskModel(BaseModel):
     priority: int = Field(default=5, ge=1, le=9)
     metadata: Dict[str, Any] = Field(default_factory=dict)
     error: Optional[str] = None
+    manual_resume: bool = Field(default=False, description="3次失败后需手动恢复")
     
     # --- 阶段管理 ---
     stage_progress: Dict[TaskStage, StageProgress] = Field(default_factory=dict)

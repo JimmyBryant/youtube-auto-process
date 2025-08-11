@@ -1,8 +1,10 @@
+
 import whisperx
 from pathlib import Path
 from typing import Optional
 import logging
 from src.core.task_manager import TaskManager
+from src.core.models import TaskStatus
 
 class AudioTranscriber:
     """基于Whisper的智能语音转写"""
@@ -10,7 +12,8 @@ class AudioTranscriber:
     def __init__(self, model_size: str = "medium", device: str = "cpu"):
         self.logger = logging.getLogger('transcriber')
         self.device = device
-        self.model = whisperx.load_model(model_size, device)
+        # 强制使用 float32，避免 float16 错误
+        self.model = whisperx.load_model(model_size, device, compute_type="float32")
 
     async def transcribe(self, task_id: str, video_path: Path) -> Optional[Path]:
         """执行语音转写（使用 whisperx medium）"""
@@ -22,12 +25,16 @@ class AudioTranscriber:
                 result = self.model.transcribe(audio, batch_size=16)
                 segments = result["segments"] if "segments" in result else result.get("segments", [])
                 self._save_srt(segments, srt_path)
-            await TaskManager().update_artifacts(task_id, {
-                'srt_path': str(srt_path)
-            })
+            from src.core.models import TaskStage, StageStatus
+            await TaskManager().update_stage_status(
+                task_id,
+                stage=TaskStage.TRANSCRIBING,
+                status=StageStatus.COMPLETED,
+                output_files={'subtitle_path': str(srt_path)}
+            )
             return srt_path
         except Exception as e:
-            await TaskManager().mark_failed(task_id, f"转写失败: {str(e)}")
+            await TaskManager().update_task_status(task_id, status=TaskStatus.FAILED, error=f"转写失败: {str(e)}")
             self.logger.error(f"任务 {task_id} 转写失败: {str(e)}")
             return None
 
@@ -57,36 +64,82 @@ class AudioTranscriber:
 
     def _split_text(self, text: str, max_len: int) -> list:
         """
-        按标点、空格优先分割超长字幕，保证每条不超过 max_len 字符。
+        优化字幕切割：
+        1. 先按句末标点（。！？.!?…）分割
+        2. 超长句再按逗号、分号、顿号等断句标点分割
+        3. 仍超长则按空格优雅切割
+        4. 实在不行再硬切
         """
         import re
-        # 中文/英文标点优先
-        punct = r'[。！？!?;；,，、]'  # 可根据需要扩展
-        result = []
+        # 1. 先按句末标点分割
+        end_punct = r'[。！？.!?…]'  # 句末标点
+        parts = re.split(f'({end_punct})', text)
+        sents = []
         buf = ''
-        for char in text:
-            buf += char
-            if len(buf) >= max_len:
-                # 尝试向前找到最近的标点或空格
-                m = re.search(r'(.+?)([。！？!?;；,，、\s])[^。！？!?;；,，、\s]*$', buf)
-                if m:
-                    cut = m.end()
-                    result.append(buf[:cut].strip())
-                    buf = buf[cut:]
-                else:
-                    result.append(buf.strip())
-                    buf = ''
+        for seg in parts:
+            if not seg:
+                continue
+            buf += seg
+            if re.match(end_punct, seg):
+                sents.append(buf.strip())
+                buf = ''
         if buf.strip():
-            result.append(buf.strip())
-        # 二次处理，防止有的分段仍超长
+            sents.append(buf.strip())
+
+        def further_split(sent, max_len):
+            sent = sent.strip()
+            if len(sent) <= max_len:
+                return [sent]
+            # 2. 按逗号、分号、顿号等断句标点分割
+            mid_punct = r'[，,；;、]'  # 断句标点
+            mid_parts = re.split(f'({mid_punct})', sent)
+            mid_sents = []
+            mid_buf = ''
+            for seg in mid_parts:
+                if not seg:
+                    continue
+                mid_buf += seg
+                if re.match(mid_punct, seg):
+                    mid_sents.append(mid_buf.strip())
+                    mid_buf = ''
+            if mid_buf.strip():
+                mid_sents.append(mid_buf.strip())
+            # 如果分割后都不超长，直接返回
+            if all(len(s) <= max_len for s in mid_sents):
+                return mid_sents
+            # 3. 对超长的再按空格优雅切割
+            result = []
+            for s in mid_sents:
+                if len(s) <= max_len:
+                    result.append(s)
+                else:
+                    # 优雅按空格分割
+                    words = s.split(' ')
+                    lines = []
+                    line = ''
+                    for word in words:
+                        if not line:
+                            line = word
+                        elif len(line) + 1 + len(word) <= max_len:
+                            line += ' ' + word
+                        else:
+                            lines.append(line)
+                            line = word
+                    if line:
+                        lines.append(line)
+                    # 递归处理每一行，确保没有超长
+                    for l in lines:
+                        if len(l) <= max_len:
+                            result.append(l)
+                        else:
+                            # 4. 实在不行再硬切
+                            for i in range(0, len(l), max_len):
+                                result.append(l[i:i+max_len])
+            return result
+
         final = []
-        for seg in result:
-            if len(seg) <= max_len:
-                final.append(seg)
-            else:
-                # 强制截断
-                for i in range(0, len(seg), max_len):
-                    final.append(seg[i:i+max_len])
+        for seg in sents:
+            final.extend(further_split(seg, max_len))
         return final
 
     @staticmethod

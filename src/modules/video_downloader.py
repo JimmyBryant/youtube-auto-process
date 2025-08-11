@@ -52,10 +52,16 @@ class VideoDownloader:
             task_id = output_dir.name  # 使用目录名作为任务ID
             
             ydl_opts = {
-                'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best',
+                # 只选 H.264+AAC，保证 macOS 播放器兼容
+                'format': 'bestvideo[ext=mp4][vcodec^=avc1]+bestaudio[ext=m4a][acodec^=mp4a]/best[ext=mp4][vcodec^=avc1][acodec^=mp4a]',
                 'outtmpl': str(output_dir / f"{task_id}.%(ext)s"),
                 'writethumbnail': True,
                 'quiet': True,
+                'merge_output_format': 'mp4',
+                'postprocessors': [{
+                    'key': 'FFmpegVideoConvertor',
+                    'preferedformat': 'mp4'
+                }],
             }
             if cookie_file:
                 ydl_opts['cookiefile'] = str(cookie_file)

@@ -75,15 +75,16 @@ class TaskManager:
             self.logger.error(f"Save task failed: {str(e)}")
             raise TaskStateError("Failed to save task")
 
-    async def update_task_status(self, task_id: str, status: TaskStatus, error: Optional[str] = None) -> TaskModel:
-        """更新任务状态"""
+    async def update_task_status(self, task_id: str, status: TaskStatus, error: Optional[str] = None, extra: Optional[Dict[str, Any]] = None) -> TaskModel:
+        """更新任务状态，支持额外字段（如 manual_resume）"""
         update_data = {
             'status': status.value,
             'updated_at': datetime.now(timezone.utc)
         }
         if error:
             update_data['error'] = error
-        
+        if extra:
+            update_data.update(extra)
         return await self._atomic_update(task_id, update_data)
 
     async def update_stage_status(

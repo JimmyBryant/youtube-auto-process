@@ -144,27 +144,19 @@ async def start_service(cookie_file=None):
         scheduler = TaskScheduler(cookie_file=Path(cookie_file) if cookie_file else None)
         print("🚀🚀 启动任务处理服务... (Ctrl+C 停止)")
         try:
-            async with asyncio.TaskGroup() as tg:
-                tg.create_task(scheduler.start())
-                tg.create_task(scheduler.monitor_status())
-        except* Exception as ex:
+            # 兼容 Python 3.10：不用 TaskGroup，改用 gather
+            await asyncio.gather(
+                scheduler.start(),
+                scheduler.monitor_status()
+            )
+        except Exception as ex:
             # 更详细的错误处理
-            if hasattr(ex, 'exceptions'):
-                errors = ex.exceptions
-                print(f"⚠️ 服务异常 (共 {len(errors)} 个错误):")
-                for i, error in enumerate(errors, 1):
-                    print(f"\n错误 #{i}:")
-                    print(f"  类型: {type(error).__name__}")
-                    print(f"  详细信息: {str(error)}")
-                    if hasattr(error, '__traceback__'):
-                        import traceback
-                        traceback.print_exception(type(error), error, error.__traceback__)
-            else:
-                print(f"⚠️ 服务异常: {str(ex)}")
-            # 将错误信息存储在scheduler实例中
+            print(f"⚠️ 服务异常: {str(ex)}")
+            import traceback
+            traceback.print_exc()
             scheduler.error_info = {
-                'type': type(error).__name__,
-                'message': str(error)
+                'type': type(ex).__name__,
+                'message': str(ex)
             }
     except Exception as e:
         print(f"❌❌ 服务启动失败: {str(e)}")

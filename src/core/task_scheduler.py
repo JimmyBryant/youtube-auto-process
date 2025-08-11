@@ -10,7 +10,8 @@ from .task_manager import TaskManager
 from .models import TaskStatus, TaskStage, StageStatus, TaskModel, ProcessingType
 from src.modules.video_downloader import download_video
 from src.modules.transcriber import AudioTranscriber
-from src.modules.translation_service import translate_subtitles
+import os
+from src.modules.translation_service import TranslationService
 from src.modules.comment_processor import fetch_comments, process_comments
 from src.modules.video_editor import edit_video
 from src.modules.publisher import VideoPublisher  # 修改为导入类
@@ -35,8 +36,8 @@ class TaskScheduler:
             # 阶段处理器映射
             self.stage_handlers = {
                 TaskStage.DOWNLOADING: lambda task, task_dir: self._handle_downloading(task, task_dir, self.cookie_file),
-                TaskStage.TRANSCRIBING: self._handle_transcribing,
-                # TaskStage.TRANSLATING: self._handle_translating,
+                TaskStage.TRANSCRIBING: lambda task, task_dir: self._handle_transcribing(task),
+                TaskStage.TRANSLATING: lambda task, task_dir: self._handle_translating(task),
                 # TaskStage.COMMENT_FETCHING: self._handle_comment_fetching,
                 # TaskStage.COMMENT_PROCESSING: self._handle_comment_processing,
                 # TaskStage.SYNTHESIZING: self._handle_synthesizing,
@@ -47,7 +48,7 @@ class TaskScheduler:
             self.stage_sequence = [
                 TaskStage.DOWNLOADING,
                 TaskStage.TRANSCRIBING,
-                # TaskStage.TRANSLATING,
+                TaskStage.TRANSLATING,
                 # TaskStage.COMMENT_FETCHING,
                 # TaskStage.COMMENT_PROCESSING,
                 # TaskStage.SYNTHESIZING,
@@ -62,20 +63,32 @@ class TaskScheduler:
             logger.error(f"调度器初始化失败: {str(e)}")
             raise
     async def start(self):
-        """启动任务调度器主循环"""
+        """启动任务调度器主循环，支持 failed 任务断点续做，3次失败后需手动恢复，自动检测僵尸阶段"""
         logger.info("🚀 Starting task scheduler main loop")
+        ZOMBIE_TIMEOUT = 30 * 60  # 30分钟未更新即视为僵尸任务，可根据需要调整
         while not self._stop_event.is_set():
             try:
-                # 获取待处理任务
-                pending_tasks = await self.task_manager.list_tasks(status=TaskStatus.PENDING)
-                
-                # 如果当前活跃任务数未达上限且有等待的任务
-                if len(self.active_tasks) < self.max_concurrent_tasks and pending_tasks:
-                    # 按优先级排序
-                    pending_tasks.sort(key=lambda t: t.priority, reverse=True)
-                    
-                    # 启动新任务
-                    for task in pending_tasks[:self.max_concurrent_tasks - len(self.active_tasks)]:
+                # 获取待处理和失败的任务
+                tasks = await self.task_manager.list_tasks(limit=100)
+                now = datetime.now(timezone.utc)
+                # 自动检测并恢复僵尸阶段（processing状态长时间未更新）
+                for task in tasks:
+                    for stage, progress in (task.stage_progress or {}).items():
+                        if getattr(progress, 'status', None) == 'processing':
+                            updated_at = getattr(progress, 'updated_at', None)
+                            if updated_at and (now - updated_at).total_seconds() > ZOMBIE_TIMEOUT:
+                                logger.warning(f"检测到僵尸阶段: 任务{task.id} 阶段{stage}，自动重置为pending")
+                                await self.task_manager.update_stage_status(
+                                    task_id=task.id,
+                                    stage=stage,
+                                    status='pending',
+                                    error='自动检测到僵尸阶段，已重置为pending'
+                                )
+                # 只自动处理未标记 manual_resume 的任务
+                candidate_tasks = [t for t in tasks if t.status in [TaskStatus.PENDING, TaskStatus.FAILED] and not getattr(t, 'manual_resume', False)]
+                if len(self.active_tasks) < self.max_concurrent_tasks and candidate_tasks:
+                    candidate_tasks.sort(key=lambda t: t.priority, reverse=True)
+                    for task in candidate_tasks[:self.max_concurrent_tasks - len(self.active_tasks)]:
                         task_id = task.id
                         if task_id not in self.active_tasks:
                             logger.info(f"▶️ Starting processing for task {task_id}")
@@ -83,16 +96,13 @@ class TaskScheduler:
                             self.active_tasks[task_id].add_done_callback(
                                 lambda t, tid=task_id: self._task_done_callback(t, tid)
                             )
-                
-                # 等待一小段时间再检查
                 await asyncio.sleep(1)
-                
             except Exception as e:
                 logger.error(f"⚠️ Scheduler loop error: {str(e)}")
-                await asyncio.sleep(5)  # 出错后等待更长时间
+                await asyncio.sleep(5)
     async def _process_task(self, task: TaskModel):
         task_dir = None
-        """处理单个任务，阶段失败自动重试3次"""
+        """处理单个任务，支持断点续做，阶段失败自动重试3次，3次失败后需手动恢复"""
         try:
             # 创建唯一临时目录
             task_dir = self.temp_base_dir / f"task_{task.id}_{uuid.uuid4().hex[:6]}"
@@ -100,13 +110,15 @@ class TaskScheduler:
             # 更新任务状态为处理中
             await self.task_manager.update_task_status(task.id, TaskStatus.PROCESSING)
 
-            # 按阶段顺序处理任务
             for stage in self.stage_sequence:
+                stage_progress = task.stage_progress.get(stage)
+                if stage_progress and stage_progress.status == StageStatus.COMPLETED:
+                    logger.info(f"⏩ 跳过已完成阶段 {stage} for task {task.id}")
+                    continue
                 max_retries = 3
                 for attempt in range(1, max_retries + 1):
                     success, outputs = await self.stage_handlers[stage](task, task_dir)
                     if success:
-                        # 更新阶段状态
                         await self.task_manager.update_stage_status(
                             task_id=task.id,
                             stage=stage,
@@ -117,22 +129,20 @@ class TaskScheduler:
                     else:
                         logger.warning(f"阶段 {stage} 第 {attempt} 次执行失败，任务ID: {task.id}")
                         if attempt < max_retries:
-                            await asyncio.sleep(3)  # 可根据需要调整重试间隔
+                            await asyncio.sleep(3)
                 else:
-                    # 3次都失败
                     logger.error(f"阶段 {stage} 连续3次失败，任务ID: {task.id}，任务终止")
-                    await self.task_manager.update_task_status(task.id, TaskStatus.FAILED)
+                    # 标记任务为FAILED并加manual_resume
+                    await self.task_manager.update_task_status(task.id, TaskStatus.FAILED, extra={"manual_resume": True})
                     return
 
-            # 所有阶段完成
             await self.task_manager.update_task_status(task.id, TaskStatus.COMPLETED)
             logger.info(f"🎉 Task {task.id} completed successfully")
 
         except Exception as e:
             logger.error(f"❌ Task {task.id} failed: {str(e)}")
-            await self.task_manager.update_task_status(task.id, TaskStatus.FAILED, error=str(e))
+            await self.task_manager.update_task_status(task.id, TaskStatus.FAILED, error=str(e), extra={"manual_resume": True})
         finally:
-            # 仅清理已完成/失败的任务
             if task_dir and task.status in {TaskStatus.COMPLETED, TaskStatus.FAILED}:
                 await self._cleanup_task_files(task_dir)
 
@@ -198,12 +208,12 @@ class TaskScheduler:
         """处理字幕生成阶段（whisperx medium）"""
         logger.info(f"🔤🔤 Handling transcribing for task {task.id}")
         stage_progress = task.stage_progress.get(TaskStage.TRANSCRIBING)
-        if stage_progress.status == StageStatus.COMPLETED:
+        if stage_progress is not None and stage_progress.status == StageStatus.COMPLETED:
             logger.info(f"⏩⏩⏩ Skipping already completed transcribing for task {task.id}")
             return True, stage_progress.output_files
         # 检查前置阶段是否完成
         download_progress = task.stage_progress.get(TaskStage.DOWNLOADING)
-        if download_progress.status != StageStatus.COMPLETED:
+        if download_progress is None or download_progress.status != StageStatus.COMPLETED:
             raise RuntimeError(f"Download not completed for task {task.id}, can't transcribe")
         try:
             await self.task_manager.update_stage_status(
@@ -227,39 +237,31 @@ class TaskScheduler:
             return False, {}
 
     async def _handle_translating(self, task: TaskModel) -> Tuple[bool, Dict[str, str]]:
-        """处理字幕翻译阶段"""
+        """处理字幕翻译阶段，支持多家大语言模型API，目标语言和API KEY通过环境变量配置，自动分段翻译"""
         logger.info(f"🌐🌐 Handling translating for task {task.id}")
-        
+
         stage_progress = task.stage_progress.get(TaskStage.TRANSLATING)
-        if stage_progress.status == StageStatus.COMPLETED:
+        if stage_progress and stage_progress.status == StageStatus.COMPLETED:
             logger.info(f"⏩⏩⏩ Skipping already completed translating for task {task.id}")
             return True, stage_progress.output_files
-        
+
         # 检查前置阶段是否完成
         transcribe_progress = task.stage_progress.get(TaskStage.TRANSCRIBING)
-        if transcribe_progress.status != StageStatus.COMPLETED:
+        if not transcribe_progress or transcribe_progress.status != StageStatus.COMPLETED:
             raise RuntimeError(f"Transcribing not completed for task {task.id}, can't translate")
-        
+
         try:
-            # 开始阶段
             await self.task_manager.update_stage_status(
                 task_id=task.id,
                 stage=TaskStage.TRANSLATING,
                 status=StageStatus.PROCESSING
             )
-            
-            # 获取字幕路径
+
             subtitle_path = Path(transcribe_progress.output_files["subtitle_path"])
-            
-            # 翻译字幕
-            task_dir = Path(task.temp_dir)
-            translated_subtitle_path = await translate_subtitles(subtitle_path, task_dir)
-            
-            # 返回输出文件信息
-            outputs = {
-                "translated_subtitle_path": str(translated_subtitle_path)
-            }
-            
+            # 使用 TranslationService 类进行翻译
+            translation_service = TranslationService()
+            translated_srt_path = await translation_service.translate_subtitle(subtitle_path)
+            outputs = {"translated_subtitle_path": str(translated_srt_path)}
             return True, outputs
         except Exception as e:
             logger.error(f"❌❌ Translating failed for task {task.id}: {str(e)}")
