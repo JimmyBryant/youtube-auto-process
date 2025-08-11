@@ -17,14 +17,28 @@ class AudioTranscriber:
 
     async def transcribe(self, task_id: str, video_path: Path) -> Optional[Path]:
         """执行语音转写（使用 whisperx medium）"""
+        import time
         try:
             srt_path = video_path.with_suffix('.srt')
             if not srt_path.exists():
                 self.logger.info(f"开始转写: {video_path.name}")
                 audio = whisperx.load_audio(str(video_path))
+                # 获取音频时长
+                try:
+                    import soundfile as sf
+                    f = sf.SoundFile(str(video_path))
+                    audio_duration = f.frames / f.samplerate
+                except Exception:
+                    audio_duration = None
+                start_time = time.time()
                 result = self.model.transcribe(audio, batch_size=16)
+                end_time = time.time()
                 segments = result["segments"] if "segments" in result else result.get("segments", [])
                 self._save_srt(segments, srt_path)
+                # 打印音频时长和转录耗时
+                if audio_duration is not None:
+                    self.logger.info(f"音频时长: {audio_duration:.2f} 秒")
+                self.logger.info(f"转录耗时: {end_time - start_time:.2f} 秒")
             from src.core.models import TaskStage, StageStatus
             await TaskManager().update_stage_status(
                 task_id,
@@ -40,27 +54,16 @@ class AudioTranscriber:
 
     def _save_srt(self, segments: list, path: Path, max_len: int = 40):
         """
-        生成SRT字幕文件：
-        - 每条字幕只一行
-        - 超长字幕自动分割为多条，优先按标点/空格分割，时间轴均分
+        生成SRT字幕文件：每个 segment 只输出一条 SRT，不做切割，保留原始分段。
         """
-        import re
         srt_idx = 1
         with open(path, 'w') as f:
             for seg in segments:
                 start_time = seg['start']
                 end_time = seg['end']
                 text = seg['text'].replace('\n', ' ').replace('\r', ' ').replace('  ', ' ').strip()
-                # 分割超长字幕
-                split_texts = self._split_text(text, max_len)
-                n = len(split_texts)
-                # 均分时间轴
-                duration = (end_time - start_time) / n if n > 0 else 0
-                for i, sub_text in enumerate(split_texts):
-                    sub_start = start_time + i * duration
-                    sub_end = start_time + (i + 1) * duration if i < n - 1 else end_time
-                    f.write(f"{srt_idx}\n{self._format_time(sub_start)} --> {self._format_time(sub_end)}\n{sub_text}\n\n")
-                    srt_idx += 1
+                f.write(f"{srt_idx}\n{self._format_time(start_time)} --> {self._format_time(end_time)}\n{text}\n\n")
+                srt_idx += 1
 
     def _split_text(self, text: str, max_len: int) -> list:
         """

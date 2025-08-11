@@ -66,49 +66,55 @@ class TranslationService:
         if block:
             srt_blocks.append(block)
 
-        # 提取所有字幕文本行，带序号
-        numbered_lines = []  # [(block_idx, line_idx, text)]
-        for block_idx, blk in enumerate(srt_blocks):
-            for line_idx, line in enumerate(blk[2:] if len(blk) >= 3 else blk[1:]):
-                text = line.strip()
-                if text:
-                    numbered_lines.append((block_idx, line_idx, text))
-
-        # 构造带序号的翻译输入
-        prompt_lines = []
-        for i, (_, _, text) in enumerate(numbered_lines):
-            prompt_lines.append(f"{i+1}. {text}")
-        prompt = "\n".join(prompt_lines)
-
-        # 分段，避免API超长
-        max_chars = 3500
-        segments = []
-        seg_indices = []
-        current = []
-        current_indices = []
-        current_len = 0
-        for idx, line in enumerate(prompt_lines):
-            if current_len + len(line) > max_chars and current:
-                segments.append(current)
-                seg_indices.append(current_indices)
-                current = [line]
-                current_indices = [idx]
-                current_len = len(line)
+        # 提取所有字幕块文本
+        block_texts = []
+        for blk in srt_blocks:
+            if len(blk) >= 3:
+                text = "".join(blk[2:]).strip()
+                block_texts.append(text)
+            elif len(blk) >= 1:
+                block_texts.append(blk[-1].strip())
             else:
-                current.append(line)
-                current_indices.append(idx)
-                current_len += len(line)
+                block_texts.append("")
+
+        # 分段，限制每段条数和总字符数，且每条带序号
+        max_chars = 3500
+        max_lines = 6  # 每段最多6条字幕
+        segments = []  # 每段是[(idx, text)]
+        current = []
+        current_len = 0
+        for idx, text in enumerate(block_texts):
+            text = text or ""
+            numbered = f"{idx+1}. {text}"
+            # 若单条超长，强制分段
+            if len(numbered) > max_chars:
+                if current:
+                    segments.append(current)
+                    current = []
+                    current_len = 0
+                segments.append([(idx, text)])
+                continue
+            if (current_len + len(numbered) > max_chars or len(current) >= max_lines) and current:
+                segments.append(current)
+                current = [(idx, text)]
+                current_len = len(numbered)
+            else:
+                current.append((idx, text))
+                current_len += len(numbered)
         if current:
             segments.append(current)
-            seg_indices.append(current_indices)
 
-        # 翻译每个分段，要求大模型按序号返回翻译
-        translated_lines = [None] * len(numbered_lines)
-        for idx_seg, (seg, seg_idx_list) in enumerate(zip(segments, seg_indices)):
-            seg_prompt = "请将以下字幕内容逐行翻译为" + self.target_lang + "，严格按原序号返回翻译结果，每行格式为 '序号. 翻译内容'，不要解释：\n" + "\n".join(seg)
-            logger.info(f"Translating segment {idx_seg+1}/{len(segments)} (lines: {len(seg)})...")
+        # 翻译每个分段，带序号，解析时严格按序号对齐，缺失自动补空
+        translated_blocks_text = [None] * len(block_texts)
+        for idx_seg, seg in enumerate(segments):
+            seg_prompt = (
+                f"请将以下字幕内容每条整体翻译为{self.target_lang}，严格保持每条字幕的顺序和数量，不要合并、拆分、遗漏或省略任何一条。"
+                "每条翻译请以‘序号. 翻译内容’格式输出，顺序与原文一致，不要添加任何解释或多余内容。\n"
+                + "\n".join([f"{idx+1}. {text}" for idx, text in seg])
+            )
+            logger.info(f"Translating segment {idx_seg+1}/{len(segments)} (blocks: {len(seg)})...")
             logger.info("\n==== 段原文 ====")
-            for l in seg:
+            for _, l in seg:
                 logger.info(l)
             try:
                 translated = await translate_text_with_llm(
@@ -122,11 +128,11 @@ class TranslationService:
                 logger.info("\n==== 段翻译结果 ====")
                 for l in translated.strip().split("\n"):
                     logger.info(l)
-                # 解析返回，提取序号和翻译内容
-                for line in translated.strip().split("\n"):
-                    line = line.strip()
-                    if not line:
-                        continue
+                # 解析返回，按序号对齐
+                lines = [line.strip() for line in translated.strip().split("\n") if line.strip()]
+                idx_map = {idx: i for i, (idx, _) in enumerate(seg)}
+                found = set()
+                for line in lines:
                     if ". " in line:
                         num_str, content = line.split(". ", 1)
                     elif "." in line:
@@ -136,24 +142,28 @@ class TranslationService:
                         continue
                     try:
                         idx_in_all = int(num_str) - 1
-                        if 0 <= idx_in_all < len(translated_lines):
-                            translated_lines[idx_in_all] = content
+                        if idx_in_all in idx_map:
+                            translated_blocks_text[idx_in_all] = content
+                            found.add(idx_in_all)
                     except Exception:
                         continue
+                # 自动补齐缺失
+                for idx, _ in seg:
+                    if idx not in found:
+                        translated_blocks_text[idx] = ""
+                if len(found) != len(seg):
+                    logger.warning(f"[TranslationService] 翻译返回行数({len(found)})与原字幕块数({len(seg)})不一致，已自动补齐。")
             except Exception as e:
                 logger.error(f"Segment {idx_seg+1} translation failed: {e}", exc_info=True)
                 raise
 
         # 回填到SRT块
-        # 先复制原块
         translated_blocks = [blk[:] for blk in srt_blocks]
-        # 用翻译结果替换原文
-        for i, (block_idx, line_idx, _) in enumerate(numbered_lines):
-            fill_text = translated_lines[i] if translated_lines[i] is not None else ""
-            blk = translated_blocks[block_idx]
-            # 找到要替换的行（第3行及以后）
+        for idx, text in enumerate(translated_blocks_text):
+            blk = translated_blocks[idx]
+            fill_text = text if text is not None else ""
             if len(blk) >= 3:
-                blk[2 + line_idx] = fill_text + "\n"
+                blk[2:] = [fill_text + "\n"]
             elif len(blk) >= 1:
                 blk[-1] = fill_text + "\n"
 
