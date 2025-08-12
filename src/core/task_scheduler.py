@@ -12,6 +12,7 @@ from src.modules.video_downloader import download_video
 from src.modules.transcriber import AudioTranscriber
 import os
 from src.modules.translation_service import TranslationService
+from src.modules.subtitle_splitting import split_srt_file
 from src.modules.comment_processor import fetch_comments, process_comments
 from src.modules.video_editor import edit_video
 from src.modules.publisher import VideoPublisher  # 修改为导入类
@@ -38,10 +39,11 @@ class TaskScheduler:
                 TaskStage.DOWNLOADING: lambda task, task_dir: self._handle_downloading(task, task_dir, self.cookie_file),
                 TaskStage.TRANSCRIBING: lambda task, task_dir: self._handle_transcribing(task),
                 TaskStage.TRANSLATING: lambda task, task_dir: self._handle_translating(task),
-                # TaskStage.COMMENT_FETCHING: self._handle_comment_fetching,
-                # TaskStage.COMMENT_PROCESSING: self._handle_comment_processing,
-                # TaskStage.SYNTHESIZING: self._handle_synthesizing,
-                # TaskStage.PUBLISHING: self._handle_publishing
+                TaskStage.SUBTITLE_SPLITTING: lambda task, task_dir: self._handle_subtitle_splitting(task),
+                # TaskStage.COMMENT_FETCHING: lambda task, task_dir: self._handle_comment_fetching(task),
+                # TaskStage.COMMENT_PROCESSING: lambda task, task_dir: self._handle_comment_processing(task),
+                # TaskStage.SYNTHESIZING: lambda task, task_dir: self._handle_synthesizing(task),
+                # TaskStage.PUBLISHING: lambda task, task_dir: self._handle_publishing(task),
             }
             
             # 阶段执行顺序
@@ -49,6 +51,7 @@ class TaskScheduler:
                 TaskStage.DOWNLOADING,
                 TaskStage.TRANSCRIBING,
                 TaskStage.TRANSLATING,
+                TaskStage.SUBTITLE_SPLITTING,
                 # TaskStage.COMMENT_FETCHING,
                 # TaskStage.COMMENT_PROCESSING,
                 # TaskStage.SYNTHESIZING,
@@ -111,6 +114,8 @@ class TaskScheduler:
             await self.task_manager.update_task_status(task.id, TaskStatus.PROCESSING)
 
             for stage in self.stage_sequence:
+                # 每次循环都刷新最新 task 状态，确保依赖的阶段状态是最新的
+                task = await self.task_manager.get_task_by_id(task.id)
                 stage_progress = task.stage_progress.get(stage)
                 if stage_progress and stage_progress.status == StageStatus.COMPLETED:
                     logger.info(f"⏩ 跳过已完成阶段 {stage} for task {task.id}")
@@ -268,6 +273,55 @@ class TaskScheduler:
             await self.task_manager.update_stage_status(
                 task_id=task.id,
                 stage=TaskStage.TRANSLATING,
+                status=StageStatus.FAILED,
+                error=str(e)
+            )
+            return False, {}
+
+    async def _handle_subtitle_splitting(self, task: TaskModel) -> Tuple[bool, Dict[str, str]]:
+        """处理字幕分割阶段，确保原始和翻译后的 SRT 每行不超长，输出新 SRT 文件路径"""
+        logger.info(f"✂️✂️ Handling subtitle splitting for task {task.id}")
+        stage_progress = task.stage_progress.get(TaskStage.SUBTITLE_SPLITTING)
+        if stage_progress and stage_progress.status == StageStatus.COMPLETED:
+            logger.info(f"⏩⏩⏩ Skipping already completed subtitle splitting for task {task.id}")
+            return True, stage_progress.output_files
+
+        # 检查前置阶段
+        transcribe_progress = task.stage_progress.get(TaskStage.TRANSCRIBING)
+        translate_progress = task.stage_progress.get(TaskStage.TRANSLATING)
+        if not transcribe_progress or transcribe_progress.status != StageStatus.COMPLETED:
+            raise RuntimeError(f"Transcribing not completed for task {task.id}, can't split subtitles")
+        if not translate_progress or translate_progress.status != StageStatus.COMPLETED:
+            raise RuntimeError(f"Translating not completed for task {task.id}, can't split subtitles")
+
+        try:
+            await self.task_manager.update_stage_status(
+                task_id=task.id,
+                stage=TaskStage.SUBTITLE_SPLITTING,
+                status=StageStatus.PROCESSING
+            )
+
+            orig_srt_path = Path(transcribe_progress.output_files["subtitle_path"])
+            trans_srt_path = Path(translate_progress.output_files["translated_subtitle_path"])
+
+            # 输出新文件名
+            orig_split_path = orig_srt_path.parent / (orig_srt_path.stem + ".split.srt")
+            trans_split_path = trans_srt_path.parent / (trans_srt_path.stem + ".split.srt")
+
+            # 分割原文和译文 SRT
+            split_srt_file(str(orig_srt_path), str(orig_split_path), max_line_length=32)
+            split_srt_file(str(trans_srt_path), str(trans_split_path), max_line_length=32)
+
+            outputs = {
+                "split_subtitle_path": str(orig_split_path),
+                "split_translated_subtitle_path": str(trans_split_path)
+            }
+            return True, outputs
+        except Exception as e:
+            logger.error(f"❌❌ Subtitle splitting failed for task {task.id}: {str(e)}")
+            await self.task_manager.update_stage_status(
+                task_id=task.id,
+                stage=TaskStage.SUBTITLE_SPLITTING,
                 status=StageStatus.FAILED,
                 error=str(e)
             )

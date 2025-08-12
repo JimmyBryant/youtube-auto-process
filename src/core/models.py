@@ -26,6 +26,7 @@ class TaskStage(str, Enum):
     DOWNLOADING = "downloading"
     TRANSCRIBING = "transcribing"
     TRANSLATING = "translating"
+    SUBTITLE_SPLITTING = "subtitle_splitting"
     COMMENT_FETCHING = "comment_fetching"
     COMMENT_PROCESSING = "comment_processing"
     SYNTHESIZING = "synthesizing"
@@ -70,6 +71,7 @@ TimestampKey = Literal[
     "downloading_start",
     "transcribing_start",
     "translating_start",
+    "subtitle_splitting_start",
     "comment_fetching_start",
     "comment_processing_start",
     "synthesizing_start",
@@ -77,6 +79,7 @@ TimestampKey = Literal[
     "downloading_end",
     "transcribing_end",
     "translating_end",
+    "subtitle_splitting_end",
     "comment_fetching_end",
     "comment_processing_end",
     "synthesizing_end",

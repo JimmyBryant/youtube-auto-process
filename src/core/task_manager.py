@@ -11,6 +11,10 @@ from .exceptions import TaskNotFoundError, TaskStateError
 
 class TaskManager:
 
+    async def get_task_by_id(self, task_id: str) -> TaskModel:
+        """兼容调度器调用，等价于 get_task"""
+        return await self.get_task(task_id)
+
     """任务管理中心（兼容Pydantic V2）"""
     
     def __init__(self):
