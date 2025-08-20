@@ -87,10 +87,22 @@ TimestampKey = Literal[
 ]
 
 class TaskModel(BaseModel):
+    # 兼容 ObjectId 自动转字符串，适配 Pydantic v2
+    @staticmethod
+    def _id_to_str(v):
+        from bson import ObjectId
+        if isinstance(v, ObjectId):
+            return str(v)
+        return v
+
+    from pydantic import field_serializer
+    @field_serializer('id')
+    def serialize_id(self, v):
+        return self._id_to_str(v)
     """完整的任务数据模型（优化版）"""
     
     # --- 核心字段 ---
-    id: Optional[str] = Field(None, alias="_id")
+    id: Optional[Any] = Field(None, alias="_id")  # 兼容 ObjectId 及 str
     video_url: str = Field(...)
     status: TaskStatus = Field(default=TaskStatus.PENDING)
     stage: Optional[TaskStage] = None
@@ -107,25 +119,7 @@ class TaskModel(BaseModel):
             "created_at": datetime.now(timezone.utc)
         }
     )
-
-    # --- 计算方法 ---
-    @computed_field
-    @property
-    def downloaded_video_path(self) -> Optional[str]:
-        """获取下载的视频路径（从阶段数据中读取）"""
-        return self.get_stage_file(TaskStage.DOWNLOADING, "video_path")
-
-    @computed_field
-    @property
-    def downloaded_thumbnail_path(self) -> Optional[str]:
-        """获取下载的封面路径（从阶段数据中读取）"""
-        return self.get_stage_file(TaskStage.DOWNLOADING, "thumbnail_path")
-
-    @computed_field
-    @property
-    def subtitle_path(self) -> Optional[str]:
-        """获取生成的字幕路径"""
-        return self.get_stage_file(TaskStage.TRANSCRIBING, "subtitle_path")
+    temp_dir: Optional[str] = None  # 临时目录路径
 
     # --- 核心方法 ---
     def get_stage_file(self, stage: TaskStage, file_key: str) -> Optional[str]:
@@ -199,14 +193,3 @@ class TaskModel(BaseModel):
         use_enum_values=True,
         arbitrary_types_allowed=True
     )
-
-    @field_validator("id", mode="before")
-    def convert_objectid(cls, v):
-        """ID字段验证器"""
-        if v is None:
-            return None
-        if isinstance(v, ObjectId):
-            return str(v)
-        if isinstance(v, str) and ObjectId.is_valid(v):
-            return v
-        raise ValueError("Invalid ID format")

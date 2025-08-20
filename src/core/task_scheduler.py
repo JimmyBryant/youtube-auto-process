@@ -40,10 +40,10 @@ class TaskScheduler:
                 TaskStage.TRANSCRIBING: lambda task, task_dir: self._handle_transcribing(task),
                 TaskStage.TRANSLATING: lambda task, task_dir: self._handle_translating(task),
                 TaskStage.SUBTITLE_SPLITTING: lambda task, task_dir: self._handle_subtitle_splitting(task),
-                # TaskStage.COMMENT_FETCHING: lambda task, task_dir: self._handle_comment_fetching(task),
-                # TaskStage.COMMENT_PROCESSING: lambda task, task_dir: self._handle_comment_processing(task),
-                # TaskStage.SYNTHESIZING: lambda task, task_dir: self._handle_synthesizing(task),
-                # TaskStage.PUBLISHING: lambda task, task_dir: self._handle_publishing(task),
+                TaskStage.COMMENT_FETCHING: lambda task, task_dir: self._handle_comment_fetching(task, task_dir),
+                # TaskStage.COMMENT_PROCESSING: lambda task, task_dir: self._handle_comment_processing(task, task_dir),
+                # TaskStage.SYNTHESIZING: lambda task, task_dir: self._handle_synthesizing(task, task_dir),
+                # TaskStage.PUBLISHING: lambda task, task_dir: self._handle_publishing(task, task_dir),
             }
             
             # 阶段执行顺序
@@ -52,7 +52,7 @@ class TaskScheduler:
                 TaskStage.TRANSCRIBING,
                 TaskStage.TRANSLATING,
                 TaskStage.SUBTITLE_SPLITTING,
-                # TaskStage.COMMENT_FETCHING,
+                TaskStage.COMMENT_FETCHING,
                 # TaskStage.COMMENT_PROCESSING,
                 # TaskStage.SYNTHESIZING,
                 # TaskStage.PUBLISHING
@@ -104,18 +104,30 @@ class TaskScheduler:
                 logger.error(f"⚠️ Scheduler loop error: {str(e)}")
                 await asyncio.sleep(5)
     async def _process_task(self, task: TaskModel):
-        task_dir = None
         """处理单个任务，支持断点续做，阶段失败自动重试3次，3次失败后需手动恢复"""
+        task_dir = None
         try:
-            # 创建唯一临时目录
-            task_dir = self.temp_base_dir / f"task_{task.id}_{uuid.uuid4().hex[:6]}"
-            task_dir.mkdir(exist_ok=True)
+            # 1. 优先复用数据库中的 temp_dir
+            if getattr(task, 'temp_dir', None):
+                task_dir = Path(task.temp_dir)
+            else:
+                # 2. 没有则新建并写入数据库
+                task_dir = self.temp_base_dir / f"task_{task.id}_{uuid.uuid4().hex[:6]}"
+                task_dir.mkdir(exist_ok=True)
+                # 写入数据库
+                task.temp_dir = str(task_dir)
+                # 立即保存到数据库，确保断点续做可用
+                await self.task_manager.save_task(task)
+
             # 更新任务状态为处理中
             await self.task_manager.update_task_status(task.id, TaskStatus.PROCESSING)
 
             for stage in self.stage_sequence:
                 # 每次循环都刷新最新 task 状态，确保依赖的阶段状态是最新的
                 task = await self.task_manager.get_task_by_id(task.id)
+                # 保证 task_dir 一致
+                if getattr(task, 'temp_dir', None):
+                    task_dir = Path(task.temp_dir)
                 stage_progress = task.stage_progress.get(stage)
                 if stage_progress and stage_progress.status == StageStatus.COMPLETED:
                     logger.info(f"⏩ 跳过已完成阶段 {stage} for task {task.id}")
@@ -327,12 +339,12 @@ class TaskScheduler:
             )
             return False, {}
 
-    async def _handle_comment_fetching(self, task: TaskModel) -> Tuple[bool, Dict[str, str]]:
+    async def _handle_comment_fetching(self, task: TaskModel, task_dir: Path) -> Tuple[bool, Dict[str, str]]:
         """处理评论获取阶段"""
         logger.info(f"💬💬 Handling comment fetching for task {task.id}")
         
         stage_progress = task.stage_progress.get(TaskStage.COMMENT_FETCHING)
-        if stage_progress.status == StageStatus.COMPLETED:
+        if stage_progress is not None and stage_progress.status == StageStatus.COMPLETED:
             logger.info(f"⏩⏩⏩ Skipping already completed comment fetching for task {task.id}")
             return True, stage_progress.output_files
         
@@ -345,7 +357,6 @@ class TaskScheduler:
             )
             
             # 获取评论
-            task_dir = Path(task.temp_dir)
             comments_file = await fetch_comments(task.video_url, task_dir)
             
             # 返回输出文件信息

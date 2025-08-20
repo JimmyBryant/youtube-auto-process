@@ -141,6 +141,22 @@ class TaskCLI:
 async def start_service(cookie_file=None):
     """启动任务处理服务 (带状态监控)"""
     try:
+        # 启动前先清理所有 processing 状态的任务和阶段
+        from src.core.task_manager import TaskManager
+        from src.core.models import TaskStatus, StageStatus
+        manager = TaskManager()
+        print("⏳ 启动前检查并清理 processing 状态任务...")
+        tasks = await manager.list_tasks(status=TaskStatus.PROCESSING, limit=1000)
+        for task in tasks:
+            await manager.update_task_status(task.id, TaskStatus.FAILED, error="Auto-failed on service start")
+            if task.stage_progress:
+                for stage, progress in task.stage_progress.items():
+                    # stage 可能是 str，需转为 TaskStage Enum
+                    from src.core.models import TaskStage
+                    stage_enum = TaskStage(stage) if isinstance(stage, str) else stage
+                    if getattr(progress, 'status', None) == StageStatus.PROCESSING.value:
+                        await manager.update_stage_status(task.id, stage_enum, StageStatus.FAILED, error="Auto-failed on service start")
+        print("✅ 所有 processing 状态任务已清理")
         scheduler = TaskScheduler(cookie_file=Path(cookie_file) if cookie_file else None)
         print("🚀🚀 启动任务处理服务... (Ctrl+C 停止)")
         try:
@@ -238,7 +254,26 @@ async def main():
     except (ValueError, RuntimeError) as e:
         print(f"\n错误: {str(e)}")
     except KeyboardInterrupt:
-        print("\n操作已取消")
+        print("\n操作已取消，正在标记所有 processing 任务为 failed...")
+        try:
+            from src.core.task_manager import TaskManager
+            from src.core.models import TaskStatus, StageStatus
+            import asyncio
+            async def fail_processing_tasks():
+                manager = TaskManager()
+                # 1. 批量查找所有 processing 状态的任务
+                tasks = await manager.list_tasks(status=TaskStatus.PROCESSING.value, limit=1000)
+                for task in tasks:
+                    await manager.update_task_status(task.id, TaskStatus.FAILED, error="Terminated by KeyboardInterrupt")
+                    # 2. 阶段也要处理
+                    if task.stage_progress:
+                        for stage, progress in task.stage_progress.items():
+                            if getattr(progress, 'status', None) == StageStatus.PROCESSING.value:
+                                await manager.update_stage_status(task.id, stage, StageStatus.FAILED, error="Terminated by KeyboardInterrupt")
+            asyncio.run(fail_processing_tasks())
+            print("所有 processing 任务已标记为 failed。")
+        except Exception as e:
+            print(f"自动标记失败: {e}")
 
 if __name__ == "__main__":
     asyncio.run(main())
