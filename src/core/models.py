@@ -28,7 +28,7 @@ class TaskStage(str, Enum):
     TRANSLATING = "translating"
     SUBTITLE_SPLITTING = "subtitle_splitting"
     COMMENT_FETCHING = "comment_fetching"
-    COMMENT_PROCESSING = "comment_processing"
+    COMMENT_TRANSLATING = "comment_translating"
     SYNTHESIZING = "synthesizing"
     PUBLISHING = "publishing"
 
@@ -55,7 +55,7 @@ class StageProgress(BaseModel):
     progress: Optional[TaskProgress] = None
     message: Optional[str] = None
     error: Optional[str] = None
-    output_files: Dict[str, str] = Field(default_factory=dict)  # 关键修改：存储文件路径
+    output_files: Dict[str, Any] = Field(default_factory=dict)  # 关键修改：存储文件路径
     output_data: Optional[Any] = None
 
 # 预生成时间戳键

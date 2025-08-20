@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 from typing import Optional, Dict, Any
 from pymongo import ReturnDocument
 from pymongo.errors import PyMongoError
+from pymongo import UpdateOne 
 from bson import ObjectId
 import logging
 from .database import db_manager
@@ -161,3 +162,58 @@ class TaskManager:
         except Exception as e:
             self.logger.error(f"Delete task failed: {str(e)}")
             return False
+    
+    async def get_comments_by_video_url(self, video_url: str) -> list[dict]:
+        """根据视频URL获取评论列表"""
+        try:
+            col = self.db.comments
+            comments = list(col.find({"video_url": video_url}))
+            return comments
+        except PyMongoError as e:
+            self.logger.error(f"Failed to get comments for video {video_url}: {str(e)}")
+            raise TaskStateError("Failed to get comments")
+    async def get_untranslated_comments_by_video_url(self, video_url: str) -> list[dict]:
+        """
+        获取指定视频下所有未翻译的评论（translated_text字段不存在或为空）
+        :param video_url: 视频URL
+        :return: 未翻译的评论列表
+        """
+        try:
+            col = self.db.comments
+            # 查询条件：匹配该视频URL，且translated_text不存在或为空
+            query = {
+                "video_url": video_url,
+                "$or": [
+                    {"translated_text": {"$exists": False}},
+                    {"translated_text": {"$in": [None, ""]}}
+                ]
+            }
+            comments = list(col.find(query))
+            self.logger.info(f"Found {len(comments)} untranslated comments for video {video_url}")
+            return comments
+        except PyMongoError as e:
+            self.logger.error(f"Failed to get untranslated comments for video {video_url}: {str(e)}")
+            raise TaskStateError("Failed to get untranslated comments")
+    async def update_comments_translation(self, comments: list[dict]) -> int:
+        """批量更新评论的翻译内容（使用bulk_write优化性能）"""
+        try:
+            col = self.db.comments
+            if not comments:
+                return 0
+                
+            # 准备批量更新操作
+            operations = [
+                UpdateOne(
+                    {'_id': comment['_id']},
+                    {'$set': {'translated_text': comment['translated_text']}}
+                )
+                for comment in comments
+            ]
+            
+            # 执行批量操作
+            result = col.bulk_write(operations)
+            return result.modified_count
+            
+        except PyMongoError as e:
+            self.logger.error(f"Failed to update comments translation: {str(e)}")
+            raise TaskStateError("Failed to update comments translation")

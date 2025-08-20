@@ -1,11 +1,24 @@
+import re
+from src.modules.translation_service import TranslationService
+from src.core.task_manager import TaskManager
 import logging
 from pathlib import Path
 from typing import List, Dict, Optional
 import asyncio
 import json
 
+
 logger = logging.getLogger('comment_processor')
 
+def is_chinese(text: str) -> bool:
+    """
+    判断文本是否包含中文字符
+    :param text: 输入文本
+    :return: 如果包含中文字符返回True，否则返回False
+    """
+    # 匹配常见中文字符范围
+    zh_pattern = re.compile(r'[\u4e00-\u9fff\u3400-\u4dbf\U00020000-\U0002a6df\U0002a700-\U0002b73f\U0002b740-\U0002b81f\U0002b820-\U0002ceaf]')
+    return bool(zh_pattern.search(text))
 
 async def fetch_comments(video_url: str, output_dir: Path, max_comments: int = 100) -> Path:
     MIN_COMMENTS = 10
@@ -28,6 +41,9 @@ async def fetch_comments(video_url: str, output_dir: Path, max_comments: int = 1
                 like_span = await el.query_selector('span#vote-count-middle')
                 like_text = await like_span.inner_text() if like_span else "0"
                 like_count = int(like_text.replace(',', '').strip() or "0")
+                # 如果点赞数为0，直接返回None
+                if like_count == 0:
+                    return None
                 time_el = await el.query_selector('span#published-time-text a')
                 timestamp = await time_el.inner_text() if time_el else ""
                 author_el = await el.query_selector('a#author-text span')
@@ -216,3 +232,62 @@ async def process_comments(comments_file: Path, output_dir: Path) -> List[Path]:
     except Exception as e:
         logger.error(f"Failed to process comments: {str(e)}")
         raise
+
+async def translate_comments(video_url: str, target_lang: str = 'zh') -> int:
+    """
+    从数据库获取指定视频的评论并翻译（完全使用TaskManager接口）
+    :param video_url: 视频URL
+    :param target_lang: 目标语言
+    :return: 翻译的评论数量（确保返回整数）
+    """
+    try:
+        logger.info(f"开始翻译视频评论: {video_url} -> {target_lang}")
+        
+        # 1. 通过TaskManager获取评论
+        task_manager = TaskManager()
+        comments = await task_manager.get_untranslated_comments_by_video_url(video_url)
+        
+        if not comments:
+            logger.warning(f"视频{video_url}没有可翻译的评论")
+            return 0  # 确保返回整数 0
+            
+        logger.info(f"获取到{len(comments)}条待处理评论")
+
+        # 2. 准备需要翻译的文本
+        texts = [c.get('text', '') for c in comments]
+        need_translate = [not is_chinese(t) for t in texts]
+        to_translate = [t for t, need in zip(texts, need_translate) if need]
+        
+        logger.info(f"翻译统计: 总评论{len(comments)}条, 需翻译{len(to_translate)}条")
+
+        # 3. 执行翻译（仅翻译非中文内容）
+        translated = []
+        if to_translate:
+            service = TranslationService()
+            translated = await service.translate_list(to_translate, target_lang=target_lang)
+            logger.info(f"成功翻译{len(translated)}条评论")
+
+        # 4. 合并翻译结果到评论对象
+        idx = 0
+        for i, (comment, need) in enumerate(zip(comments, need_translate)):
+            if need and idx < len(translated):
+                comment['translated_text'] = translated[idx]
+                idx += 1
+                logger.debug(f"已翻译评论[{i}]: {comment['text'][:30]}...")
+            else:
+                comment['translated_text'] = comment.get('text', '')
+                logger.debug(f"跳过中文评论[{i}]: {comment['text'][:30]}...")
+
+        # 5. 通过TaskManager批量更新翻译结果
+        modified_count = await task_manager.update_comments_translation(comments)
+        
+        # 确保 modified_count 是整数
+        if not isinstance(modified_count, int):
+            modified_count = int(modified_count)  # 强制转换为整数
+        
+        logger.info(f"数据库更新完成，受影响记录: {modified_count}/{len(comments)}")
+        return modified_count  # 确保返回整数
+        
+    except Exception as e:
+        logger.error(f"评论翻译流程异常: {str(e)}", exc_info=True)
+        return 0  # 出错时也返回整数 0

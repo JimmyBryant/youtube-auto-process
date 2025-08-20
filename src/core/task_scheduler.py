@@ -1,3 +1,4 @@
+
 import asyncio
 import logging
 import shutil
@@ -5,7 +6,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 import uuid
-
+import json
+import re
 from .task_manager import TaskManager
 from .models import TaskStatus, TaskStage, StageStatus, TaskModel, ProcessingType
 from src.modules.video_downloader import download_video
@@ -13,9 +15,8 @@ from src.modules.transcriber import AudioTranscriber
 import os
 from src.modules.translation_service import TranslationService
 from src.modules.subtitle_splitting import split_srt_file
-from src.modules.comment_processor import fetch_comments, process_comments
-from src.modules.video_editor import edit_video
-from src.modules.publisher import VideoPublisher  # 修改为导入类
+from src.modules.comment_processor import fetch_comments, translate_comments
+
 
 logger = logging.getLogger('task_scheduler')
 
@@ -41,7 +42,7 @@ class TaskScheduler:
                 TaskStage.TRANSLATING: lambda task, task_dir: self._handle_translating(task),
                 TaskStage.SUBTITLE_SPLITTING: lambda task, task_dir: self._handle_subtitle_splitting(task),
                 TaskStage.COMMENT_FETCHING: lambda task, task_dir: self._handle_comment_fetching(task, task_dir),
-                # TaskStage.COMMENT_PROCESSING: lambda task, task_dir: self._handle_comment_processing(task, task_dir),
+                TaskStage.COMMENT_TRANSLATING: lambda task, task_dir: self._handle_comment_translating(task, task_dir),
                 # TaskStage.SYNTHESIZING: lambda task, task_dir: self._handle_synthesizing(task, task_dir),
                 # TaskStage.PUBLISHING: lambda task, task_dir: self._handle_publishing(task, task_dir),
             }
@@ -53,7 +54,7 @@ class TaskScheduler:
                 TaskStage.TRANSLATING,
                 TaskStage.SUBTITLE_SPLITTING,
                 TaskStage.COMMENT_FETCHING,
-                # TaskStage.COMMENT_PROCESSING,
+                TaskStage.COMMENT_TRANSLATING,
                 # TaskStage.SYNTHESIZING,
                 # TaskStage.PUBLISHING
             ]
@@ -375,51 +376,53 @@ class TaskScheduler:
             )
             return False, {}
 
-    async def _handle_comment_processing(self, task: TaskModel) -> Tuple[bool, Dict[str, str]]:
-        """处理评论处理阶段"""
-        logger.info(f"🖼🖼 Handling comment processing for task {task.id}")
+
+    async def _handle_comment_translating(self, task: TaskModel, task_dir: Path) -> Tuple[bool, Dict[str, str]]:
+        """处理评论翻译阶段，使用 comment_processor 模块的函数"""
+        logger.info(f"🌍 Handling comment translating for task {task.id}")
         
-        stage_progress = task.stage_progress.get(TaskStage.COMMENT_PROCESSING)
-        if stage_progress.status == StageStatus.COMPLETED:
-            logger.info(f"⏩⏩⏩ Skipping already completed comment processing for task {task.id}")
+        # 检查阶段是否已完成
+        stage_progress = task.stage_progress.get(TaskStage.COMMENT_TRANSLATING)
+        if stage_progress and stage_progress.status == StageStatus.COMPLETED:
+            logger.info(f"⏩ Skipping already completed comment translating for task {task.id}")
             return True, stage_progress.output_files
-        
+
         # 检查前置阶段是否完成
         fetch_progress = task.stage_progress.get(TaskStage.COMMENT_FETCHING)
-        if fetch_progress.status != StageStatus.COMPLETED:
-            raise RuntimeError(f"Comment fetching not completed for task {task.id}, can't process")
-        
+        if not fetch_progress or fetch_progress.status != StageStatus.COMPLETED:
+            raise RuntimeError(f"Comment fetching not completed for task {task.id}, can't translate comments")
+
         try:
-            # 开始阶段
+            # 更新阶段状态为处理中
             await self.task_manager.update_stage_status(
                 task_id=task.id,
-                stage=TaskStage.COMMENT_PROCESSING,
+                stage=TaskStage.COMMENT_TRANSLATING,
                 status=StageStatus.PROCESSING
             )
             
-            # 获取评论文件路径
-            comments_file = Path(fetch_progress.output_files["comments_file"])
+            # 使用 comment_processor 模块的 translate_comments 函数
+            translated_count = await translate_comments(
+                video_url=task.video_url,
+                target_lang='zh'  # 默认翻译为中文
+            )
             
-            # 处理评论并生成图片
-            task_dir = Path(task.temp_dir)
-            comment_images = await process_comments(comments_file, task_dir)
-            
-            # 返回输出文件信息
             outputs = {
-                "comment_images": [str(img) for img in comment_images]
+                "translated_count": translated_count,
+                "video_url": task.video_url
             }
             
+            logger.info(f"✅ Successfully translated {translated_count} comments for task {task.id}")
             return True, outputs
+            
         except Exception as e:
-            logger.error(f"❌❌ Comment processing failed for task {task.id}: {str(e)}")
+            logger.error(f"❌ Comment translating failed for task {task.id}: {str(e)}")
             await self.task_manager.update_stage_status(
                 task_id=task.id,
-                stage=TaskStage.COMMENT_PROCESSING,
+                stage=TaskStage.COMMENT_TRANSLATING,
                 status=StageStatus.FAILED,
                 error=str(e)
             )
             return False, {}
-
     async def _handle_synthesizing(self, task: TaskModel) -> Tuple[bool, Dict[str, str]]:
         """处理视频合成阶段"""
         logger.info(f"🎬🎬 Handling synthesizing for task {task.id}")

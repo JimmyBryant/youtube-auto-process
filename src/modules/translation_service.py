@@ -8,6 +8,40 @@ except ImportError:
     pass
 
 class TranslationService:
+    async def translate_list(self, texts, target_lang='zh'):
+        """批量翻译文本，返回翻译结果列表"""
+        results = []
+        for text in texts:
+            try:
+                zh = await translate_text_with_llm(text, target_lang=target_lang, provider=self.provider, api_key=self.api_key, api_base=self.api_base)
+                results.append(zh)
+            except Exception as e:
+                logger.error(f"单条翻译失败: {e}")
+                results.append("")
+        return results
+
+    async def translate_comments(self, comments: list, target_lang: str = 'zh'):
+        """批量翻译评论对象列表，仅翻译非中文评论，返回带text_zh字段的新列表"""
+        import re
+        def is_chinese(text: str) -> bool:
+            if not text:
+                return False
+            zh_count = len(re.findall(r'[\u4e00-\u9fff]', text))
+            return zh_count / max(len(text), 1) > 0.5
+        texts = [c['text'] for c in comments]
+        need_translate = [not is_chinese(t) for t in texts]
+        to_translate = [t for t, need in zip(texts, need_translate) if need]
+        translated = []
+        if to_translate:
+            translated = await self.translate_list(to_translate, target_lang=target_lang)
+        idx = 0
+        for c, need in zip(comments, need_translate):
+            if need:
+                c['text_zh'] = translated[idx]
+                idx += 1
+            else:
+                c['text_zh'] = c['text']
+        return comments
     def __init__(self, provider: str = None, target_lang: str = None):
         import os
         self.provider = provider or os.getenv("LLM_PROVIDER", "openai")
