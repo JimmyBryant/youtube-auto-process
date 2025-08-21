@@ -100,28 +100,22 @@ class TaskManager:
         error: Optional[str] = None,
         output_files: Optional[Dict[str, str]] = None
     ) -> TaskModel:
-        """更新任务的阶段状态"""
+        """更新任务的阶段状态，只保留 started_at 和 completed_at"""
         now = datetime.now(timezone.utc)
         stage_progress_update = {
-            "status": status.value,
-            "updated_at": now
+            "status": status.value
         }
-        
         if status == StageStatus.PROCESSING:
             stage_progress_update["started_at"] = now
         elif status in (StageStatus.COMPLETED, StageStatus.FAILED):
             stage_progress_update["completed_at"] = now
-            
         if error:
             stage_progress_update["error"] = error
         if output_files:
             stage_progress_update["output_files"] = output_files
-            
         update_data = {
-            f"stage_progress.{stage.value}": stage_progress_update,
-            "updated_at": now
+            f"stage_progress.{stage.value}": stage_progress_update
         }
-        
         return await self._atomic_update(task_id, update_data)
 
     async def _atomic_update(self, task_id: str, update: Dict[str, Any]) -> TaskModel:

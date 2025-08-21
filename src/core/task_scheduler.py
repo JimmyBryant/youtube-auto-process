@@ -43,7 +43,7 @@ class TaskScheduler:
                 TaskStage.SUBTITLE_SPLITTING: lambda task, task_dir: self._handle_subtitle_splitting(task),
                 TaskStage.COMMENT_FETCHING: lambda task, task_dir: self._handle_comment_fetching(task, task_dir),
                 TaskStage.COMMENT_TRANSLATING: lambda task, task_dir: self._handle_comment_translating(task, task_dir),
-                # TaskStage.SYNTHESIZING: lambda task, task_dir: self._handle_synthesizing(task, task_dir),
+                TaskStage.SYNTHESIZING: lambda task, task_dir: self._handle_synthesizing(task),
                 # TaskStage.PUBLISHING: lambda task, task_dir: self._handle_publishing(task, task_dir),
             }
             
@@ -55,7 +55,7 @@ class TaskScheduler:
                 TaskStage.SUBTITLE_SPLITTING,
                 TaskStage.COMMENT_FETCHING,
                 TaskStage.COMMENT_TRANSLATING,
-                # TaskStage.SYNTHESIZING,
+                TaskStage.SYNTHESIZING,
                 # TaskStage.PUBLISHING
             ]
             # 检查阶段处理器是否配置正确
@@ -424,60 +424,68 @@ class TaskScheduler:
             )
             return False, {}
     async def _handle_synthesizing(self, task: TaskModel) -> Tuple[bool, Dict[str, str]]:
-        """处理视频合成阶段"""
-        logger.info(f"🎬🎬 Handling synthesizing for task {task.id}")
-        
+        """处理视频合成阶段：将原字幕、中文字幕和带动画的评论插入视频（通过SyntheticVideo类）"""
+        logger.info(f"🎬 Handling synthesizing for task {task.id}")
         stage_progress = task.stage_progress.get(TaskStage.SYNTHESIZING)
-        if stage_progress.status == StageStatus.COMPLETED:
-            logger.info(f"⏩⏩⏩ Skipping already completed synthesizing for task {task.id}")
+        if stage_progress and stage_progress.status == StageStatus.COMPLETED:
+            logger.info(f"⏩ Skipping already completed synthesizing for task {task.id}")
             return True, stage_progress.output_files
-        
+
         # 检查前置阶段是否完成
         required_stages = [
             (TaskStage.DOWNLOADING, "Downloading"),
             (TaskStage.TRANSLATING, "Translating"),
-            (TaskStage.COMMENT_PROCESSING, "Comment processing")
+            (TaskStage.SUBTITLE_SPLITTING, "Subtitle splitting"),
+            (TaskStage.COMMENT_TRANSLATING, "Comment translating")
         ]
-        
         for stage, name in required_stages:
             progress = task.stage_progress.get(stage)
-            if progress.status != StageStatus.COMPLETED:
+            if not progress or progress.status != StageStatus.COMPLETED:
                 raise RuntimeError(f"{name} not completed for task {task.id}, can't synthesize")
-        
+
         try:
-            # 开始阶段
             await self.task_manager.update_stage_status(
                 task_id=task.id,
                 stage=TaskStage.SYNTHESIZING,
                 status=StageStatus.PROCESSING
             )
-            
             # 获取所需文件路径
             download_progress = task.stage_progress.get(TaskStage.DOWNLOADING)
             translate_progress = task.stage_progress.get(TaskStage.TRANSLATING)
-            comment_progress = task.stage_progress.get(TaskStage.COMMENT_PROCESSING)
-            
+            split_progress = task.stage_progress.get(TaskStage.SUBTITLE_SPLITTING)
+
             video_path = Path(download_progress.output_files["video_path"])
-            translated_subtitle_path = Path(translate_progress.output_files["translated_subtitle_path"])
-            comment_images = [Path(img) for img in comment_progress.output_files["comment_images"]]
-            
-            # 合成视频
+            orig_srt = Path(split_progress.output_files["split_subtitle_path"])
+            zh_srt = Path(split_progress.output_files["split_translated_subtitle_path"])
+
+            # 获取翻译后的评论（含时间、作者、translated_text）
+            from src.core.database import db_manager
+            db = db_manager.get_database()
+            col = db.comments
+            comments = list(col.find({"video_url": task.video_url, "translated_text": {"$exists": True}}))
+            comments.sort(key=lambda c: c.get("like_count", 0), reverse=True)
+            comments = comments[:10]
+
+            # 调用SyntheticVideo类进行合成
+            from src.modules.synthetic_video import SyntheticVideo
             task_dir = Path(task.temp_dir)
-            output_path = await edit_video(
+            synth = SyntheticVideo(
                 video_path=video_path,
-                subtitle_path=translated_subtitle_path,
-                comment_images=comment_images,
-                output_dir=task_dir
+                orig_subtitle_path=orig_srt,
+                zh_subtitle_path=zh_srt,
+                comments=comments,
+                output_dir=task_dir,
+                comment_style={
+                    "bg": "transparent",
+                    "font_outline": True,
+                    "in_anim": "fadeInUp",
+                    "out_anim": "fadeOutDown"
+                }
             )
-            
-            # 更新任务输出文件路径
+            output_path = await synth.synthesize()
             await self.task_manager.save_task(task)
-            
-            # 返回输出文件信息
-            outputs = {
-                "output_path": str(output_path)
-            }
-            
+            outputs = {"output_path": str(output_path)}
+            logger.info(f"🎬 合成视频完成: {output_path}")
             return True, outputs
         except Exception as e:
             logger.error(f"❌❌ Synthesizing failed for task {task.id}: {str(e)}")

@@ -64,27 +64,7 @@ _TIMESTAMP_KEYS = [
     *(f"{stage.value}_start" for stage in TaskStage),
     *(f"{stage.value}_end" for stage in TaskStage)
 ]
-TimestampKey = Literal[
-    "created_at",
-    "started_at",
-    "completed_at",
-    "downloading_start",
-    "transcribing_start",
-    "translating_start",
-    "subtitle_splitting_start",
-    "comment_fetching_start",
-    "comment_processing_start",
-    "synthesizing_start",
-    "publishing_start",
-    "downloading_end",
-    "transcribing_end",
-    "translating_end",
-    "subtitle_splitting_end",
-    "comment_fetching_end",
-    "comment_processing_end",
-    "synthesizing_end",
-    "publishing_end"
-]
+TimestampKey = str  # 用 str 替代 Literal，配合自定义校验器
 
 class TaskModel(BaseModel):
     # 兼容 ObjectId 自动转字符串，适配 Pydantic v2
@@ -119,6 +99,14 @@ class TaskModel(BaseModel):
             "created_at": datetime.now(timezone.utc)
         }
     )
+
+    @field_validator("timestamps")
+    @classmethod
+    def validate_timestamps_keys(cls, v):
+        invalid = [k for k in v.keys() if k not in _TIMESTAMP_KEYS]
+        if invalid:
+            raise ValueError(f"Invalid timestamp keys: {invalid}. 允许的key: {_TIMESTAMP_KEYS}")
+        return v
     temp_dir: Optional[str] = None  # 临时目录路径
 
     # --- 核心方法 ---
