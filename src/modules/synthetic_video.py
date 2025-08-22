@@ -78,13 +78,13 @@ class SyntheticVideo:
             zh_font = self.find_chinese_font()
             en_font = 'Arial'
             vf_filters = []
-            # 英文字幕底部
+            # 英文字幕底部（白色）
             vf_filters.append(
                 f"subtitles='{self.orig_subtitle_path}':force_style='Fontname={en_font},Fontsize=20,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2,Shadow=0,Alignment=2'"
             )
-            # 中文字幕在英文字幕上方
+            # 中文字幕在英文字幕上方（金黄色，示例：&H0033CCFF）
             vf_filters.append(
-                f"subtitles='{self.zh_subtitle_path}':force_style='Fontname={zh_font},Fontsize=24,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2,Shadow=0,Alignment=2,MarginV=28'"
+                f"subtitles='{self.zh_subtitle_path}':force_style='Fontname={zh_font},Fontsize=24,PrimaryColour=&H0033CCFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2,Shadow=0,Alignment=2,MarginV=30'"
             )
             # 评论弹幕ASS顶部（Alignment=8，MarginV=40）
             vf_filters.append(
@@ -178,13 +178,34 @@ class SyntheticVideo:
             f"YCbCr Matrix: TV.601\n\n"
             f"[V4+ Styles]\n"
             f"Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n"
-            f"Style: Comment,{fontname},48,&H0033CCFF,&H000000FF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,2,0,8,40,40,40,1\n\n"
+            f"Style: UserName,{fontname},20,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,2,0,8,40,40,10,1\n"
+            f"Style: CommentText,{fontname},28,&H00FF9933,&H000000FF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,2,0,8,40,40,0,1\n"
+            f"Style: LikeLine,{fontname},20,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,2,0,8,40,40,0,1\n\n"
             f"[Events]\n"
             f"Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
         )
-        # 按点赞数从高到低排序，优先展示高赞评论
-        sorted_comments = sorted(self.comments, key=lambda c: c.get("like_count", 0), reverse=True)
+        # 只加载有点赞数的评论，按点赞数从高到低排序
+        sorted_comments = sorted([c for c in self.comments if c.get("like_count", 0) > 0], key=lambda c: c.get("like_count", 0), reverse=True)
         ass_events = []
+        def split_comment_lines(text, zh_len=20, en_len=40):
+            import re
+            lines = []
+            buf = ''
+            count = 0
+            for ch in text:
+                if '\u4e00' <= ch <= '\u9fff':
+                    count += 2
+                else:
+                    count += 1
+                buf += ch
+                if (count >= zh_len*2) or (not ('\u4e00' <= ch <= '\u9fff') and count >= en_len):
+                    lines.append(buf)
+                    buf = ''
+                    count = 0
+            if buf:
+                lines.append(buf)
+            return '\\N'.join(line.strip() for line in lines if line.strip())
+
         for idx, c in enumerate(sorted_comments):
             # 每条评论从视频第24+idx*18秒出现，持续16秒，间隔2秒
             appear_time = 24 + idx * 18
@@ -193,12 +214,22 @@ class SyntheticVideo:
             text = c.get("translated_text") or c.get("text") or ""
             author = c.get("author", "")
             like_count = c.get("like_count", 0)
-            # 评论内容金黄，点赞数和图标白色（\c&HFFFFFF&）
-            event = (
-                f"Dialogue: 0,{start},{end},Comment,,0,0,0,,"
-                f"{{\\b1}}{author}: {text}  {{\\c&HFFFFFF&}}[赞]{like_count}"
+            # 自动分行，汉字每行20，英文每行40
+            wrapped_text = split_comment_lines(text, zh_len=20, en_len=40)
+            # 用户名在上，评论内容在中，点赞在下，分别用不同Style
+            event_user = (
+                f"Dialogue: 0,{start},{end},UserName,,0,0,0,,"
+                f"{{\\b1}}{author}"
             )
-            ass_events.append(event)
+            event_comment = (
+                f"Dialogue: 0,{start},{end},CommentText,,0,0,0,,"
+                f"{wrapped_text}"
+            )
+            event_like = (
+                f"Dialogue: 0,{start},{end},LikeLine,,0,0,0,,"
+                f"{{\\c&HFFFFFF&}}[赞]{like_count}"
+            )
+            ass_events.extend([event_user, event_comment, event_like])
         with open(ass_path, "w", encoding="utf-8") as f:
             f.write(ass_header)
             for e in ass_events:

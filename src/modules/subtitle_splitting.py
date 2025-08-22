@@ -9,7 +9,17 @@ def split_srt_file(input_path: Union[str, Path], output_path: Union[str, Path], 
     切割逻辑：优先按句末标点（。！？.!?…），再按逗号、分号、顿号等断句标点，最后按空格，实在不行硬切。
     """
     def split_text(text: str, max_len: int) -> List[str]:
-        # 1. 先按句末标点分割
+        text = text.strip()
+        # 自动根据语言调整max_len：中/日文=max_len//2，英文=max_len
+        def is_cjk(ch):
+            return ('\u4e00' <= ch <= '\u9fff') or ('\u3040' <= ch <= '\u30ff') or ('\u3400' <= ch <= '\u4dbf')
+        cjk_count = sum(1 for ch in text if is_cjk(ch))
+        ratio = cjk_count / max(1, len(text))
+        if ratio > 0.5:
+            lang_max = max_len // 2 if max_len > 1 else 1
+        else:
+            lang_max = max_len
+        # 优先按句末标点切割
         end_punct = r'[。！？.!?…]'
         parts = re.split(f'({end_punct})', text)
         sents = []
@@ -23,12 +33,14 @@ def split_srt_file(input_path: Union[str, Path], output_path: Union[str, Path], 
                 buf = ''
         if buf.strip():
             sents.append(buf.strip())
-
+        # 如果所有分句都不超长，直接返回
+        if all(len(s) <= lang_max for s in sents):
+            return sents
+        # 对超长的句子再按逗号、分号、顿号等断句标点切割
         def further_split(sent: str, max_len: int) -> List[str]:
             sent = sent.strip()
             if len(sent) <= max_len:
                 return [sent]
-            # 2. 按逗号、分号、顿号等断句标点分割
             mid_punct = r'[，,；;、]'
             mid_parts = re.split(f'({mid_punct})', sent)
             mid_sents = []
@@ -42,10 +54,9 @@ def split_srt_file(input_path: Union[str, Path], output_path: Union[str, Path], 
                     mid_buf = ''
             if mid_buf.strip():
                 mid_sents.append(mid_buf.strip())
-            # 如果都不超长直接返回
             if all(len(s) <= max_len for s in mid_sents):
                 return mid_sents
-            # 3. 对超长的再按空格优雅切割
+            # 对超长的再按空格优雅切割
             result = []
             for s in mid_sents:
                 if len(s) <= max_len:
@@ -63,7 +74,7 @@ def split_srt_file(input_path: Union[str, Path], output_path: Union[str, Path], 
                             line = word
                     if line:
                         result.append(line)
-                    # 兜底：如果还有超长的，硬切
+            # 兜底：如果还有超长的，硬切
             final_result = []
             for l in result:
                 if len(l) <= max_len:
@@ -72,10 +83,9 @@ def split_srt_file(input_path: Union[str, Path], output_path: Union[str, Path], 
                     for i in range(0, len(l), max_len):
                         final_result.append(l[i:i+max_len])
             return final_result
-
         final = []
         for seg in sents:
-            final.extend(further_split(seg, max_len))
+            final.extend(further_split(seg, lang_max))
         return final
 
     input_path = Path(input_path)

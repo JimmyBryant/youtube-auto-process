@@ -449,6 +449,7 @@ class TaskScheduler:
                 stage=TaskStage.SYNTHESIZING,
                 status=StageStatus.PROCESSING
             )
+            logger.info("设置合成视频阶段状态为 PROCESSING")
             # 获取所需文件路径
             download_progress = task.stage_progress.get(TaskStage.DOWNLOADING)
             translate_progress = task.stage_progress.get(TaskStage.TRANSLATING)
@@ -458,13 +459,16 @@ class TaskScheduler:
             orig_srt = Path(split_progress.output_files["split_subtitle_path"])
             zh_srt = Path(split_progress.output_files["split_translated_subtitle_path"])
 
-            # 获取翻译后的评论（含时间、作者、translated_text）
+            # 获取所有点赞数大于0的翻译后评论（含时间、作者、translated_text）
             from src.core.database import db_manager
             db = db_manager.get_database()
             col = db.comments
-            comments = list(col.find({"video_url": task.video_url, "translated_text": {"$exists": True}}))
+            comments = list(col.find({
+                "video_url": task.video_url,
+                "translated_text": {"$exists": True},
+                "like_count": {"$gt": 0}
+            }))
             comments.sort(key=lambda c: c.get("like_count", 0), reverse=True)
-            comments = comments[:10]
 
             # 调用SyntheticVideo类进行合成
             from src.modules.synthetic_video import SyntheticVideo

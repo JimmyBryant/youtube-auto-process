@@ -100,7 +100,7 @@ class TaskManager:
         error: Optional[str] = None,
         output_files: Optional[Dict[str, str]] = None
     ) -> TaskModel:
-        """更新任务的阶段状态，只保留 started_at 和 completed_at"""
+        """更新任务的阶段状态，processing时始终写入started_at，completed/failed时写入completed_at"""
         now = datetime.now(timezone.utc)
         stage_progress_update = {
             "status": status.value
