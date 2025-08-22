@@ -228,7 +228,6 @@ def parse_args():
 
 async def main():
     args = parse_args()
-    
     try:
         if args.command == 'run':
             cookie_file = args.cookie_file if hasattr(args, 'cookie_file') else None

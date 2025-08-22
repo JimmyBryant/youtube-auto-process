@@ -29,6 +29,7 @@ class TaskStage(str, Enum):
     SUBTITLE_SPLITTING = "subtitle_splitting"
     COMMENT_FETCHING = "comment_fetching"
     COMMENT_TRANSLATING = "comment_translating"
+    COVER_GENERATING = "cover_generating"
     SYNTHESIZING = "synthesizing"
     PUBLISHING = "publishing"
 

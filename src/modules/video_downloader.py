@@ -38,22 +38,22 @@ class VideoDownloader:
         except Exception as e:
             logger.warning(f"自动检查/更新 yt-dlp 失败: {e}")
 
-    async def download(self, video_url: str, output_dir: Path, cookie_file: Path = None) -> Tuple[Path, Path]:
+    async def download(self, video_url: str, output_dir: Path, cookie_file: Path = None) -> Tuple[Path, Path, str, str]:
         """
-        下载视频和封面
+        下载视频和封面，并返回视频标题和简介
         参数:
             video_url: 视频URL
             output_dir: 输出目录(Path对象)
             cookie_file: 可选，cookie文件路径
-        返回: (视频路径, 封面路径)
+        返回: (视频路径, 封面路径, 视频标题, 视频简介)
         """
         try:
             output_dir.mkdir(parents=True, exist_ok=True)
             task_id = output_dir.name  # 使用目录名作为任务ID
-            
+
             ydl_opts = {
                 # 只选 H.264+AAC，保证 macOS 播放器兼容
-                'format': 'bestvideo[ext=mp4][vcodec^=avc1]+bestaudio[ext=m4a][acodec^=mp4a]/best[ext=mp4][vcodec^=avc1][acodec^=mp4a]',
+                'format': 'bestvideo[ext=mp4][vcodec^=avc1]+bestaudio[ext=m4a][acodec^=mp4a]/best[ext=mp4][vcodec^=avc1][acodec=mp4a]',
                 'outtmpl': str(output_dir / f"{task_id}.%(ext)s"),
                 'writethumbnail': True,
                 'quiet': True,
@@ -65,12 +65,12 @@ class VideoDownloader:
             }
             if cookie_file:
                 ydl_opts['cookiefile'] = str(cookie_file)
-            
+
             # 使用线程池执行阻塞的下载操作
             loop = asyncio.get_running_loop()
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = await loop.run_in_executor(None, ydl.extract_info, video_url, True)
-                
+
                 video_path = output_dir / f"{task_id}.mp4"
                 # 支持多种图片格式
                 thumb_path = None
@@ -84,9 +84,12 @@ class VideoDownloader:
                     raise FileNotFoundError(f"下载的视频文件不存在: {video_path}")
                 if not thumb_path:
                     logger.warning(f"缩略图文件不存在: {output_dir}/{task_id}.[jpg|webp|png|jpeg]")
+                # 提取标题和简介
+                video_title = info.get('title', '')
+                video_desc = info.get('description', '')
                 logger.info(f"下载完成: {video_path}")
-                return video_path, thumb_path
-            
+                return video_path, thumb_path, video_title, video_desc
+
         except Exception as e:
             logger.error(f"下载失败: {str(e)}")
             raise RuntimeError(f"视频下载失败: {str(e)}")
@@ -94,6 +97,6 @@ class VideoDownloader:
 # 全局实例（可选）
 downloader = VideoDownloader()
 
-async def download_video(video_url: str, output_dir: Path, cookie_file: Path = None) -> Tuple[Path, Path]:
-    """兼容旧版的快捷函数，支持 cookie"""
+async def download_video(video_url: str, output_dir: Path, cookie_file: Path = None) -> Tuple[Path, Path, str, str]:
+    """兼容旧版的快捷函数，支持 cookie，返回视频路径、封面、标题、简介"""
     return await downloader.download(video_url, output_dir, cookie_file)

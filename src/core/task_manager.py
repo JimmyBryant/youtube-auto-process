@@ -100,11 +100,15 @@ class TaskManager:
         error: Optional[str] = None,
         output_files: Optional[Dict[str, str]] = None
     ) -> TaskModel:
-        """更新任务的阶段状态，processing时始终写入started_at，completed/failed时写入completed_at"""
+        """
+        更新任务的阶段状态，processing时写入started_at，completed/failed时写入completed_at，且不会覆盖已存在的started_at。
+        """
         now = datetime.now(timezone.utc)
-        stage_progress_update = {
-            "status": status.value
-        }
+        # 先获取当前阶段进度
+        task = await self.get_task(task_id)
+        stage_progress = (task.stage_progress or {}).get(stage.value, {})
+        stage_progress_update = dict(stage_progress)  # 保留已有内容
+        stage_progress_update["status"] = status.value
         if status == StageStatus.PROCESSING:
             stage_progress_update["started_at"] = now
         elif status in (StageStatus.COMPLETED, StageStatus.FAILED):

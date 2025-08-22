@@ -27,33 +27,36 @@ class SyntheticVideo:
     @staticmethod
     def find_chinese_font():
         """
-        优先返回可用的中文字体名（而非路径），以提升ffmpeg兼容性。
+        优先返回支持 emoji 的字体，其次返回可用的中文字体名（提升评论 icon/emoji 显示兼容性）。
         """
-        # 优先字体名列表，按常见程度排序
+        # 优先字体名列表，前面为 emoji/图标字体，后面为常见中文字体
         font_names = [
+            # emoji/图标字体
+            'Noto Color Emoji', 'Apple Color Emoji', 'Segoe UI Emoji', 'Twemoji',
             # macOS/现代优先
             '苹方', 'PingFang SC', 'Hiragino Sans GB', '微软雅黑', 'Microsoft YaHei', '黑体', 'SimHei',
             'Noto Sans CJK SC', 'WenQuanYi Zen Hei', 'STHeiti',
             # 传统/不推荐
-            '宋体', 'SimSun', 'STSong', 'MSYH'
+            '宋体', 'SimSun', 'STSong', 'MSYH',
+            # fallback
+            'Arial'
         ]
         # 用fc-list查找系统可用字体名
         try:
             import subprocess
-            output = subprocess.check_output(["fc-list", ":lang=zh", "family"], text=True, errors="ignore")
+            output = subprocess.check_output(["fc-list", "family"], text=True, errors="ignore")
             available_fonts = set()
             for line in output.splitlines():
-                # 可能有多个字体名，用逗号分隔
                 for name in line.split(","):
                     available_fonts.add(name.strip())
             for fname in font_names:
                 if fname in available_fonts:
-                    logger.info(f"[SyntheticVideo] 检测到可用中文字体: {fname}")
+                    logger.info(f"[SyntheticVideo] 检测到可用字体: {fname}")
                     return fname
         except Exception as e:
             logger.warning(f"[SyntheticVideo] fc-list 检查字体失败: {e}")
-        # 回退到常见字体名
-        logger.warning("[SyntheticVideo] 未找到常见中文字体，将使用 Arial，可能导致乱码。建议手动指定！")
+        # 回退到 Arial
+        logger.warning("[SyntheticVideo] 未找到常见字体，将使用 Arial，可能导致 emoji/国旗无法显示。建议手动指定！")
         return 'Arial'
 
     async def synthesize(self) -> Path:
@@ -70,11 +73,78 @@ class SyntheticVideo:
             logger.info(f"[SyntheticVideo][{video_url}] 开始合成: {self.video_path.name}, 评论数: {len(self.comments)}")
             output_path = self.output_dir / f"synthetic_{self.video_path.name}"
 
+            # 检查是否有新封面图片
+            cover_path = self.output_dir / "cover_with_title.png"
+            has_cover = cover_path.exists()
+
             # 1. 生成评论弹幕ASS字幕文件（顶部，无动画，蓝色字白描）
             ass_path = self.output_dir / f"comments.ass"
             self._generate_comments_ass(ass_path)
 
-            # 2. ffmpeg合成：原视频+原字幕+中文字幕+评论ASS弹幕
+            # 2. ffmpeg合成：如有新封面，前2秒插入封面
+            vf_filters = []
+            zh_font = self.find_chinese_font()
+            en_font = 'Arial'
+            vf_filters.append(
+                f"subtitles='{self.orig_subtitle_path}':force_style='Fontname={en_font},Fontsize=20,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2,Shadow=0,Alignment=2'"
+            )
+            vf_filters.append(
+                f"subtitles='{self.zh_subtitle_path}':force_style='Fontname={zh_font},Fontsize=24,PrimaryColour=&H0033CCFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2,Shadow=0,Alignment=2,MarginV=30'"
+            )
+            vf_filters.append(
+                f"ass={ass_path}"
+            )
+            vf_str = ",".join(vf_filters)
+
+            if has_cover:
+                # 先生成2秒封面视频
+                cover_video = self.output_dir / "cover_head.mp4"
+                cmd_cover = [
+                    "ffmpeg", "-y", "-loop", "1", "-i", str(cover_path),
+                    "-t", "2", "-vf", "scale=iw:ih", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(cover_video)
+                ]
+                logger.info(f"[SyntheticVideo] 生成封面头部视频: {' '.join(map(str, cmd_cover))}")
+                import subprocess as sp
+                sp.run(cmd_cover, check=True)
+                # 拼接封面+原视频
+                concat_list = self.output_dir / "concat_list.txt"
+                with open(concat_list, "w") as f:
+                    f.write(f"file '{cover_video}'\n")
+                    f.write(f"file '{self.video_path}'\n")
+                concat_video = self.output_dir / "video_with_cover.mp4"
+                cmd_concat = [
+                    "ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(concat_list), "-c", "copy", str(concat_video)
+                ]
+                logger.info(f"[SyntheticVideo] 拼接封面与原视频: {' '.join(map(str, cmd_concat))}")
+                sp.run(cmd_concat, check=True)
+                video_input = concat_video
+            else:
+                video_input = self.video_path
+
+            # 3. 合成字幕/弹幕
+            cmd = [
+                "ffmpeg", "-y",
+                "-threads", "4",
+                "-i", str(video_input),
+                "-vf", vf_str,
+                "-c:v", "h264_videotoolbox",
+                "-b:v", "4M",
+                "-preset", "veryfast",
+                "-c:a", "copy",
+                "-progress", "pipe:2",
+                "-nostats",
+                str(output_path)
+            ]
+            logger.info(f"[SyntheticVideo][{video_url}] 执行ffmpeg命令: {' '.join(cmd)}")
+            # 获取视频总时长
+            import subprocess as sp
+            try:
+                probe = sp.run([
+                    "ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", str(video_input)
+                ], capture_output=True, text=True, check=True)
+                total_duration = float(probe.stdout.strip())
+            except Exception:
+                total_duration = None
             zh_font = self.find_chinese_font()
             en_font = 'Arial'
             vf_filters = []
@@ -154,8 +224,29 @@ class SyntheticVideo:
         """
         生成ASS弹幕字幕，顶部，金黄色，描边黑色，点赞数和图标白色。
         自动检测视频分辨率同步 PlayResX/PlayResY。
+        支持通过 comment_style['comment_max_width_ratio'] 自定义最大宽度比例（默认0.8），自动推算每行最大字数。
         """
         fontname = self.find_chinese_font()
+        # 尝试自动检测emoji字体名
+        emoji_font_candidates = [
+            'Noto Color Emoji', 'Apple Color Emoji', 'Segoe UI Emoji', 'Twemoji'
+        ]
+        emoji_font = None
+        try:
+            import subprocess
+            output = subprocess.check_output(["fc-list", "family"], text=True, errors="ignore")
+            available_fonts = set()
+            for line in output.splitlines():
+                for name in line.split(","):
+                    available_fonts.add(name.strip())
+            for fname in emoji_font_candidates:
+                if fname in available_fonts:
+                    emoji_font = fname
+                    break
+        except Exception:
+            pass
+        if emoji_font is None:
+            emoji_font = fontname
         # 自动检测视频分辨率
         try:
             import subprocess
@@ -163,8 +254,19 @@ class SyntheticVideo:
                 "ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height", "-of", "csv=p=0:s=x", str(self.video_path)
             ], capture_output=True, text=True, check=True)
             width, height = probe.stdout.strip().split('x')
+            width = int(width)
+            height = int(height)
         except Exception:
-            width, height = '1920', '1080'
+            width, height = 1920, 1080
+        # 计算最大宽度（默认80%）
+        max_width_ratio = self.comment_style.get('comment_max_width_ratio', 0.8)
+        max_width_px = int(width * max_width_ratio)
+        # 估算每行最大汉字/英文字符数（假设字体宽度：中文约32px，英文约16px）
+        zh_len = max(int(max_width_px / 32), 8)  # 最少8字
+        en_len = max(int(max_width_px / 16), 16) # 最少16字
+        # 允许通过comment_style自定义
+        zh_len = self.comment_style.get('comment_zh_len', zh_len)
+        en_len = self.comment_style.get('comment_en_len', en_len)
         ass_header = (
             f"[Script Info]\n"
             f"; Script generated by SyntheticVideo\n"
@@ -178,17 +280,20 @@ class SyntheticVideo:
             f"YCbCr Matrix: TV.601\n\n"
             f"[V4+ Styles]\n"
             f"Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n"
-            f"Style: UserName,{fontname},20,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,2,0,8,40,40,10,1\n"
-            f"Style: CommentText,{fontname},28,&H00FF9933,&H000000FF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,2,0,8,40,40,0,1\n"
-            f"Style: LikeLine,{fontname},20,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,2,0,8,40,40,0,1\n\n"
+            f"Style: UserName,{fontname},24,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,2,0,8,40,40,10,1\n"
+            f"Style: CommentText,{fontname},32,&H00FF9933,&H000000FF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,2,0,8,40,40,0,1\n"
+            f"Style: LikeLine,{fontname},24,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,2,0,8,40,40,0,1\n\n"
             f"[Events]\n"
             f"Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
         )
         # 只加载有点赞数的评论，按点赞数从高到低排序
         sorted_comments = sorted([c for c in self.comments if c.get("like_count", 0) > 0], key=lambda c: c.get("like_count", 0), reverse=True)
         ass_events = []
-        def split_comment_lines(text, zh_len=20, en_len=40):
-            import re
+        def split_comment_lines(text, zh_len=zh_len, en_len=en_len):
+            """
+            自动分行：汉字每行zh_len，英文每行en_len。宽度约为视频宽度的80%。
+            可通过comment_style自定义。
+            """
             lines = []
             buf = ''
             count = 0
@@ -206,6 +311,8 @@ class SyntheticVideo:
                 lines.append(buf)
             return '\\N'.join(line.strip() for line in lines if line.strip())
 
+        import re
+        emoji_pattern = re.compile(r'[\U0001F300-\U0001FAFF\U00002700-\U000027BF\U0001F1E6-\U0001F1FF]+', flags=re.UNICODE)
         for idx, c in enumerate(sorted_comments):
             # 每条评论从视频第24+idx*18秒出现，持续16秒，间隔2秒
             appear_time = 24 + idx * 18
@@ -214,8 +321,32 @@ class SyntheticVideo:
             text = c.get("translated_text") or c.get("text") or ""
             author = c.get("author", "")
             like_count = c.get("like_count", 0)
-            # 自动分行，汉字每行20，英文每行40
-            wrapped_text = split_comment_lines(text, zh_len=20, en_len=40)
+            # 自动分行，宽度约为80%
+            wrapped_text = split_comment_lines(text)
+            # 对每一行做emoji混排
+            def ass_font_mixed(line):
+                # 将emoji和非emoji分段，ASS用{\fn}切换字体
+                segments = []
+                last = 0
+                for m in emoji_pattern.finditer(line):
+                    if m.start() > last:
+                        segments.append((line[last:m.start()], False))
+                    segments.append((m.group(), True))
+                    last = m.end()
+                if last < len(line):
+                    segments.append((line[last:], False))
+                out = ''
+                for seg, is_emoji in segments:
+                    if not seg:
+                        continue
+                    if is_emoji:
+                        out += f'{{\\fn{emoji_font}}}{seg}{{\\fn{fontname}}}'
+                    else:
+                        out += seg
+                return out
+            # 对ASS的每一行混排
+            wrapped_lines = wrapped_text.split('\\N')
+            ass_mixed = '\\N'.join([ass_font_mixed(line) for line in wrapped_lines])
             # 用户名在上，评论内容在中，点赞在下，分别用不同Style
             event_user = (
                 f"Dialogue: 0,{start},{end},UserName,,0,0,0,,"
@@ -223,7 +354,7 @@ class SyntheticVideo:
             )
             event_comment = (
                 f"Dialogue: 0,{start},{end},CommentText,,0,0,0,,"
-                f"{wrapped_text}"
+                f"{ass_mixed}"
             )
             event_like = (
                 f"Dialogue: 0,{start},{end},LikeLine,,0,0,0,,"

@@ -1,4 +1,5 @@
 
+from dotenv import load_dotenv
 import asyncio
 import logging
 import shutil
@@ -17,10 +18,11 @@ from src.modules.translation_service import TranslationService
 from src.modules.subtitle_splitting import split_srt_file
 from src.modules.comment_processor import fetch_comments, translate_comments
 
-
 logger = logging.getLogger('task_scheduler')
+load_dotenv()
 
 class TaskScheduler:
+
     """增强版任务调度器，支持断点续做和详细阶段管理"""
     
     def __init__(self, 
@@ -37,16 +39,17 @@ class TaskScheduler:
             self.cookie_file = cookie_file
             # 阶段处理器映射
             self.stage_handlers = {
-                TaskStage.DOWNLOADING: lambda task, task_dir: self._handle_downloading(task, task_dir, self.cookie_file),
+                TaskStage.DOWNLOADING: lambda task, task_dir: self._handle_downloading(task, task_dir),
                 TaskStage.TRANSCRIBING: lambda task, task_dir: self._handle_transcribing(task),
                 TaskStage.TRANSLATING: lambda task, task_dir: self._handle_translating(task),
                 TaskStage.SUBTITLE_SPLITTING: lambda task, task_dir: self._handle_subtitle_splitting(task),
                 TaskStage.COMMENT_FETCHING: lambda task, task_dir: self._handle_comment_fetching(task, task_dir),
                 TaskStage.COMMENT_TRANSLATING: lambda task, task_dir: self._handle_comment_translating(task, task_dir),
+                TaskStage.COVER_GENERATING: lambda task, task_dir: self._handle_cover_generating(task, task_dir),
                 TaskStage.SYNTHESIZING: lambda task, task_dir: self._handle_synthesizing(task),
                 # TaskStage.PUBLISHING: lambda task, task_dir: self._handle_publishing(task, task_dir),
             }
-            
+
             # 阶段执行顺序
             self.stage_sequence = [
                 TaskStage.DOWNLOADING,
@@ -55,6 +58,7 @@ class TaskScheduler:
                 TaskStage.SUBTITLE_SPLITTING,
                 TaskStage.COMMENT_FETCHING,
                 TaskStage.COMMENT_TRANSLATING,
+                TaskStage.COVER_GENERATING,
                 TaskStage.SYNTHESIZING,
                 # TaskStage.PUBLISHING
             ]
@@ -129,7 +133,7 @@ class TaskScheduler:
                 # 保证 task_dir 一致
                 if getattr(task, 'temp_dir', None):
                     task_dir = Path(task.temp_dir)
-                stage_progress = task.stage_progress.get(stage)
+                stage_progress = task.stage_progress.get(stage.value)
                 if stage_progress and stage_progress.status == StageStatus.COMPLETED:
                     logger.info(f"⏩ 跳过已完成阶段 {stage} for task {task.id}")
                     continue
@@ -175,45 +179,42 @@ class TaskScheduler:
             except Exception as e:
                 logger.error(f"⚠️ Status monitor error: {str(e)}")
                 await asyncio.sleep(30) 
-    async def _handle_downloading(self, task: TaskModel, task_dir: str, cookie_file: Path = None) -> Tuple[bool, Dict[str, str]]:
+    async def _handle_downloading(self, task: TaskModel, task_dir: str) -> Tuple[bool, Dict[str, str]]:
         """处理视频下载阶段"""
         logger.info(f"📥📥 Handling downloading for task {task.id}")
-        
-        stage_progress = task.stage_progress.get(TaskStage.DOWNLOADING)
+
+        stage_progress = task.stage_progress.get(TaskStage.DOWNLOADING.value)
         if stage_progress is not None and stage_progress.status == StageStatus.COMPLETED:
             logger.info(f"⏩⏩⏩ Skipping already completed downloading for task {task.id}")
             return True, stage_progress.output_files
-    
-        
+
         try:
-            # 开始阶段
             await self.task_manager.update_stage_status(
                 task_id=task.id,
                 stage=TaskStage.DOWNLOADING,
                 status=StageStatus.PROCESSING
             )
-            # 优先使用传入的 cookie_file，其次环境变量和配置文件
-            import os
-            final_cookie_file = cookie_file
-            if final_cookie_file is None:
+            # 优先使用 self.cookie_file，其次环境变量
+            final_cookie_file = None
+            if getattr(self, 'cookie_file', None):
+                final_cookie_file = self.cookie_file
+            else:
                 cookie_path = os.getenv('YT_COOKIE_PATH')
-                if not cookie_path:
-                    from dotenv import dotenv_values
-                    config_path = Path(__file__).parent.parent.parent / 'config' / 'dev.env'
-                    config = dotenv_values(config_path)
-                    cookie_path = config.get('YT_COOKIE_PATH')
                 final_cookie_file = Path(cookie_path) if cookie_path else None
-            # 下载视频和封面
-            video_path, thumbnail_path = await download_video(task.video_url, task_dir, final_cookie_file)
-            
+            # 下载视频和封面，并获取视频元数据（如标题、简介）
+            video_path, thumbnail_path, video_title, video_desc = await download_video(task.video_url, task_dir, final_cookie_file)
+
+            # 只需返回 outputs，主流程会自动调用 update_stage_status
+
             outputs = {
                 "video_path": str(video_path),
-                "thumbnail_path": str(thumbnail_path)
+                "thumbnail_path": str(thumbnail_path),
+                "video_title": video_title,
+                "video_desc": video_desc
             }
-            
             return True, outputs
         except Exception as e:
-            logger.error(f"❌❌ Download failed for task {task.id}: {str(e)}")
+            logger.error(f"❌❌ Download failed for task {task.id}: {str(e)}", exc_info=True)
             await self.task_manager.update_stage_status(
                 task_id=task.id,
                 stage=TaskStage.DOWNLOADING,
@@ -225,12 +226,12 @@ class TaskScheduler:
     async def _handle_transcribing(self, task: TaskModel) -> Tuple[bool, Dict[str, str]]:
         """处理字幕生成阶段（whisperx medium）"""
         logger.info(f"🔤🔤 Handling transcribing for task {task.id}")
-        stage_progress = task.stage_progress.get(TaskStage.TRANSCRIBING)
+        stage_progress = task.stage_progress.get(TaskStage.TRANSCRIBING.value)
         if stage_progress is not None and stage_progress.status == StageStatus.COMPLETED:
             logger.info(f"⏩⏩⏩ Skipping already completed transcribing for task {task.id}")
             return True, stage_progress.output_files
         # 检查前置阶段是否完成
-        download_progress = task.stage_progress.get(TaskStage.DOWNLOADING)
+        download_progress = task.stage_progress.get(TaskStage.DOWNLOADING.value)
         if download_progress is None or download_progress.status != StageStatus.COMPLETED:
             raise RuntimeError(f"Download not completed for task {task.id}, can't transcribe")
         try:
@@ -255,18 +256,21 @@ class TaskScheduler:
             return False, {}
 
     async def _handle_translating(self, task: TaskModel) -> Tuple[bool, Dict[str, str]]:
-        """处理字幕翻译阶段，支持多家大语言模型API，目标语言和API KEY通过环境变量配置，自动分段翻译"""
+        """处理字幕翻译阶段，同时翻译视频标题和简介，支持多家大语言模型API，目标语言和API KEY通过环境变量配置，自动分段翻译"""
         logger.info(f"🌐🌐 Handling translating for task {task.id}")
 
-        stage_progress = task.stage_progress.get(TaskStage.TRANSLATING)
+        stage_progress = task.stage_progress.get(TaskStage.TRANSLATING.value)
         if stage_progress and stage_progress.status == StageStatus.COMPLETED:
             logger.info(f"⏩⏩⏩ Skipping already completed translating for task {task.id}")
             return True, stage_progress.output_files
 
         # 检查前置阶段是否完成
-        transcribe_progress = task.stage_progress.get(TaskStage.TRANSCRIBING)
+        transcribe_progress = task.stage_progress.get(TaskStage.TRANSCRIBING.value)
+        download_progress = task.stage_progress.get(TaskStage.DOWNLOADING.value)
         if not transcribe_progress or transcribe_progress.status != StageStatus.COMPLETED:
             raise RuntimeError(f"Transcribing not completed for task {task.id}, can't translate")
+        if not download_progress or download_progress.status != StageStatus.COMPLETED:
+            raise RuntimeError(f"Downloading not completed for task {task.id}, can't translate title/desc")
 
         try:
             await self.task_manager.update_stage_status(
@@ -278,8 +282,19 @@ class TaskScheduler:
             subtitle_path = Path(transcribe_progress.output_files["subtitle_path"])
             # 使用 TranslationService 类进行翻译
             translation_service = TranslationService()
+            # 翻译字幕
             translated_srt_path = await translation_service.translate_subtitle(subtitle_path)
-            outputs = {"translated_subtitle_path": str(translated_srt_path)}
+
+            # 翻译视频标题和简介
+            video_title = download_progress.output_files.get("video_title", "")
+            video_desc = download_progress.output_files.get("video_desc", "")
+            translated_title, translated_desc = await translation_service.translate_title_and_desc(video_title, video_desc)
+
+            outputs = {
+                "translated_subtitle_path": str(translated_srt_path),
+                "translated_video_title": translated_title,
+                "translated_video_desc": translated_desc
+            }
             return True, outputs
         except Exception as e:
             logger.error(f"❌❌ Translating failed for task {task.id}: {str(e)}")
@@ -294,14 +309,14 @@ class TaskScheduler:
     async def _handle_subtitle_splitting(self, task: TaskModel) -> Tuple[bool, Dict[str, str]]:
         """处理字幕分割阶段，确保原始和翻译后的 SRT 每行不超长，输出新 SRT 文件路径"""
         logger.info(f"✂️✂️ Handling subtitle splitting for task {task.id}")
-        stage_progress = task.stage_progress.get(TaskStage.SUBTITLE_SPLITTING)
+        stage_progress = task.stage_progress.get(TaskStage.SUBTITLE_SPLITTING.value)
         if stage_progress and stage_progress.status == StageStatus.COMPLETED:
             logger.info(f"⏩⏩⏩ Skipping already completed subtitle splitting for task {task.id}")
             return True, stage_progress.output_files
 
         # 检查前置阶段
-        transcribe_progress = task.stage_progress.get(TaskStage.TRANSCRIBING)
-        translate_progress = task.stage_progress.get(TaskStage.TRANSLATING)
+        transcribe_progress = task.stage_progress.get(TaskStage.TRANSCRIBING.value)
+        translate_progress = task.stage_progress.get(TaskStage.TRANSLATING.value)
         if not transcribe_progress or transcribe_progress.status != StageStatus.COMPLETED:
             raise RuntimeError(f"Transcribing not completed for task {task.id}, can't split subtitles")
         if not translate_progress or translate_progress.status != StageStatus.COMPLETED:
@@ -344,7 +359,7 @@ class TaskScheduler:
         """处理评论获取阶段"""
         logger.info(f"💬💬 Handling comment fetching for task {task.id}")
         
-        stage_progress = task.stage_progress.get(TaskStage.COMMENT_FETCHING)
+        stage_progress = task.stage_progress.get(TaskStage.COMMENT_FETCHING.value)
         if stage_progress is not None and stage_progress.status == StageStatus.COMPLETED:
             logger.info(f"⏩⏩⏩ Skipping already completed comment fetching for task {task.id}")
             return True, stage_progress.output_files
@@ -382,13 +397,13 @@ class TaskScheduler:
         logger.info(f"🌍 Handling comment translating for task {task.id}")
         
         # 检查阶段是否已完成
-        stage_progress = task.stage_progress.get(TaskStage.COMMENT_TRANSLATING)
+        stage_progress = task.stage_progress.get(TaskStage.COMMENT_TRANSLATING.value)
         if stage_progress and stage_progress.status == StageStatus.COMPLETED:
             logger.info(f"⏩ Skipping already completed comment translating for task {task.id}")
             return True, stage_progress.output_files
 
         # 检查前置阶段是否完成
-        fetch_progress = task.stage_progress.get(TaskStage.COMMENT_FETCHING)
+        fetch_progress = task.stage_progress.get(TaskStage.COMMENT_FETCHING.value)
         if not fetch_progress or fetch_progress.status != StageStatus.COMPLETED:
             raise RuntimeError(f"Comment fetching not completed for task {task.id}, can't translate comments")
 
@@ -423,10 +438,54 @@ class TaskScheduler:
                 error=str(e)
             )
             return False, {}
+    async def _handle_cover_generating(self, task: TaskModel, task_dir: Path) -> Tuple[bool, Dict[str, str]]:
+        """生成新封面图片：在原始封面图片上写入翻译后标题"""
+        logger.info(f"🖼️ Handling cover generating for task {task.id}")
+        stage_progress = task.stage_progress.get(TaskStage.COVER_GENERATING.value)
+        if stage_progress and stage_progress.status == StageStatus.COMPLETED:
+            logger.info(f"⏩ Skipping already completed cover generating for task {task.id}")
+            return True, stage_progress.output_files
+
+        # 检查前置阶段
+        download_progress = task.stage_progress.get(TaskStage.DOWNLOADING.value)
+        translate_progress = task.stage_progress.get(TaskStage.TRANSLATING.value)
+        if not download_progress or download_progress.status != StageStatus.COMPLETED:
+            raise RuntimeError(f"Downloading not completed for task {task.id}, can't generate cover")
+        if not translate_progress or translate_progress.status != StageStatus.COMPLETED:
+            raise RuntimeError(f"Translating not completed for task {task.id}, can't generate cover")
+
+        try:
+            await self.task_manager.update_stage_status(
+                task_id=task.id,
+                stage=TaskStage.COVER_GENERATING,
+                status=StageStatus.PROCESSING
+            )
+
+            from src.modules.cover_generator import generate_cover_with_ai
+            original_cover_path = Path(download_progress.output_files["thumbnail_path"])
+            translated_title = translate_progress.output_files.get("translated_video_title", "")
+            output_path = task_dir / "cover_with_title.png"
+            generate_cover_with_ai(
+                original_cover_path=original_cover_path,
+                title=translated_title,
+                output_path=output_path
+            )
+            outputs = {"cover_with_title_path": str(output_path)}
+            logger.info(f"新封面图片生成完成: {output_path}")
+            return True, outputs
+        except Exception as e:
+            logger.error(f"❌ Cover generating failed for task {task.id}: {str(e)}")
+            await self.task_manager.update_stage_status(
+                task_id=task.id,
+                stage=TaskStage.COVER_GENERATING,
+                status=StageStatus.FAILED,
+                error=str(e)
+            )
+            return False, {}
     async def _handle_synthesizing(self, task: TaskModel) -> Tuple[bool, Dict[str, str]]:
         """处理视频合成阶段：将原字幕、中文字幕和带动画的评论插入视频（通过SyntheticVideo类）"""
         logger.info(f"🎬 Handling synthesizing for task {task.id}")
-        stage_progress = task.stage_progress.get(TaskStage.SYNTHESIZING)
+        stage_progress = task.stage_progress.get(TaskStage.SYNTHESIZING.value)
         if stage_progress and stage_progress.status == StageStatus.COMPLETED:
             logger.info(f"⏩ Skipping already completed synthesizing for task {task.id}")
             return True, stage_progress.output_files
@@ -439,7 +498,7 @@ class TaskScheduler:
             (TaskStage.COMMENT_TRANSLATING, "Comment translating")
         ]
         for stage, name in required_stages:
-            progress = task.stage_progress.get(stage)
+            progress = task.stage_progress.get(stage.value)
             if not progress or progress.status != StageStatus.COMPLETED:
                 raise RuntimeError(f"{name} not completed for task {task.id}, can't synthesize")
 

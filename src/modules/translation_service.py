@@ -8,6 +8,44 @@ except ImportError:
     pass
 
 class TranslationService:
+    def __init__(self, provider: str = None, target_lang: str = None):
+        self.provider = provider or os.getenv("LLM_PROVIDER", "openai")
+        self.target_lang = target_lang or os.getenv("TRANSLATE_TARGET_LANG", "zh")
+        # 支持多家API KEY/BASE
+        self.api_key = self._get_api_key(self.provider)
+        self.api_base = self._get_api_base(self.provider)
+    async def translate_title_and_desc(self, title: str, desc: str, target_lang: str = 'zh'):
+        """
+        翻译视频标题和简介，返回翻译后的标题和简介。
+        :param title: 原始视频标题
+        :param desc: 原始视频简介
+        :param target_lang: 目标语言，默认使用实例的 target_lang
+        :return: (translated_title, translated_desc)
+        """
+        target_lang = target_lang or self.target_lang
+        translated_title = ""
+        translated_desc = ""
+        try:
+            translated_title = await translate_text_with_llm(
+                title,
+                target_lang=target_lang,
+                provider=self.provider,
+                api_key=self.api_key,
+                api_base=self.api_base
+            ) if title else ""
+        except Exception as e:
+            logger.error(f"翻译标题失败: {e}")
+        try:
+            translated_desc = await translate_text_with_llm(
+                desc,
+                target_lang=target_lang,
+                provider=self.provider,
+                api_key=self.api_key,
+                api_base=self.api_base
+            ) if desc else ""
+        except Exception as e:
+            logger.error(f"翻译简介失败: {e}")
+        return translated_title, translated_desc
     async def translate_list(self, texts, target_lang='zh'):
         """批量翻译文本，返回翻译结果列表"""
         results = []
@@ -42,13 +80,6 @@ class TranslationService:
             else:
                 c['text_zh'] = c['text']
         return comments
-    def __init__(self, provider: str = None, target_lang: str = None):
-        import os
-        self.provider = provider or os.getenv("LLM_PROVIDER", "openai")
-        self.target_lang = target_lang or os.getenv("TRANSLATE_TARGET_LANG", "zh")
-        # 支持多家API KEY/BASE
-        self.api_key = self._get_api_key(self.provider)
-        self.api_base = self._get_api_base(self.provider)
 
     def _get_api_key(self, provider: str):
         env_map = {
