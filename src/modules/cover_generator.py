@@ -102,7 +102,7 @@ def generate_cover_with_ai(
         logger.info(f"[cover_generator] 封面主字体: {font_path_used}")
 
         color_list = [
-            (204, 153, 0),    # 深黄
+            (253, 219, 31),    # 深黄
             (255, 48, 48),    # 红
             (30, 144, 255),   # 蓝
             (255, 105, 180),  # 粉
@@ -112,7 +112,7 @@ def generate_cover_with_ai(
         def get_outline_color(main_color):
             # 判断是否为黄/深黄（色调在黄色区间，或RGB接近204,153,0/255,255,0等）
             yellow_like = [
-                (204,153,0), (255,255,0), (255,215,0), (255,204,0), (255,223,34)
+                (253,219,31), (255,255,0), (255,215,0), (255,204,0), (255,223,34)
             ]
             # 允许一定色差
             for yc in yellow_like:

@@ -175,12 +175,23 @@ class SyntheticVideo:
 
             final_output = output_path
             if has_cover:
-                # 3. 生成2秒封面视频（编码参数与内容视频一致）
+                # 3. 生成2秒封面视频（编码参数与内容视频一致，分辨率与内容视频一致）
                 cover_video = self.output_dir / "cover_head.mp4"
+                # 获取内容视频分辨率
+                try:
+                    probe = subprocess.run([
+                        "ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height", "-of", "csv=p=0:s=x", str(self.video_path)
+                    ], capture_output=True, text=True, check=True)
+                    width, height = probe.stdout.strip().split('x')
+                    width = int(width)
+                    height = int(height)
+                except Exception:
+                    width, height = 1920, 1080
+                scale_str = f"scale={width}:{height}"
                 cmd_cover = [
                     "ffmpeg", "-y", "-loop", "1", "-i", str(cover_path),
                     "-f", "lavfi", "-t", "2", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
-                    "-shortest", "-vf", "scale=iw:ih", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", str(cover_video)
+                    "-shortest", "-vf", scale_str, "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", str(cover_video)
                 ]
                 logger.info(f"[SyntheticVideo] 生成封面头部视频: {' '.join(map(str, cmd_cover))}")
                 subprocess.run(cmd_cover, check=True)
