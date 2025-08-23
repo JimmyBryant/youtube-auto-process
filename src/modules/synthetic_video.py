@@ -7,6 +7,7 @@ import time
 logger = logging.getLogger('synthetic_video')
 
 class SyntheticVideo:
+
     """
     合成视频类：负责将原视频、原字幕、中文字幕和带动画的评论合成为最终视频。
     支持透明背景、描边、入出动画等评论样式参数。
@@ -32,7 +33,9 @@ class SyntheticVideo:
         import os
         # 字体名称优先级（适合字幕/ASS/ffmpeg）
         preferred_names = [
-            "Noto Sans CJK SC", "PingFang SC", "苹方", "Hiragino Sans GB", "微软雅黑", "Microsoft YaHei",
+            "微软雅黑", "Microsoft YaHei",  # 优先匹配微软雅黑
+            "NotoSansSC-Medium",  # 其次 NotoSansSC-Medium.ttf
+            "Noto Sans CJK SC", "PingFang SC", "苹方", "Hiragino Sans GB",
             "黑体", "SimHei", "WenQuanYi Zen Hei", "STHeiti", "宋体", "SimSun", "STSong", "MSYH", "Arial"
         ]
         font_dirs = [
@@ -56,7 +59,34 @@ class SyntheticVideo:
                     return local_name
         logger.warning("[SyntheticVideo] 未找到常见字体，将使用 Arial！")
         return 'Arial'
-
+    @staticmethod
+    def find_en_font():
+        """
+        优先级字体名称数组，优先匹配科技感、现代感的英文字体。
+        """
+        import os
+        preferred_names = [
+            "Orbitron", "Roboto", "Futura", "Arial", "Helvetica", "Segoe UI", "Verdana", "Tahoma"
+        ]
+        font_dirs = [
+            os.path.expanduser("~/Library/Fonts"),
+            "/System/Library/Fonts",
+            "/Library/Fonts",
+        ]
+        local_fonts = set()
+        for font_dir in font_dirs:
+            if os.path.isdir(font_dir):
+                for fname in os.listdir(font_dir):
+                    name, ext = os.path.splitext(fname)
+                    if ext.lower() in [".ttf", ".ttc", ".otf"]:
+                        local_fonts.add(name)
+        for name in preferred_names:
+            for local_name in local_fonts:
+                if name.replace(" ","").lower() in local_name.replace(" ","").lower() or local_name.replace(" ","").lower() in name.replace(" ","").lower():
+                    logger.info(f"[SyntheticVideo] 匹配到英文字体: {local_name} (优先名: {name})")
+                    return local_name
+        logger.warning("[SyntheticVideo] 未找到科技感英文字体，将使用 Arial！")
+        return 'Arial'
     async def synthesize(self) -> Path:
         """
         合成视频，先插入多字幕和带动画的评论，再拼接2秒封面头部。
@@ -83,13 +113,13 @@ class SyntheticVideo:
             # 2. 先合成内容视频（原视频+字幕+弹幕）
 
             zh_font = self.find_chinese_font()
-            en_font = 'Arial'
+            en_font = self.find_en_font()
             vf_filters = []
             vf_filters.append(
-                f"subtitles='{self.orig_subtitle_path}':force_style='Fontname={en_font},Fontsize=20,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2,Shadow=0,Alignment=2'"
+                f"subtitles='{self.orig_subtitle_path}':force_style='Fontname={en_font},Fontsize=20,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=1,Shadow=0,Alignment=2'"
             )
             vf_filters.append(
-                f"subtitles='{self.zh_subtitle_path}':force_style='Fontname={zh_font},Fontsize=24,PrimaryColour=&H0033CCFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2,Shadow=0,Alignment=2,MarginV=30'"
+                f"subtitles='{self.zh_subtitle_path}':force_style='Fontname={zh_font},Fontsize=24,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=1,Shadow=0,Alignment=2,MarginV=30'"
             )
             if self.comments:
                 vf_filters.append(f"ass={ass_path}")
@@ -217,9 +247,9 @@ class SyntheticVideo:
             f"YCbCr Matrix: TV.601\n\n"
             f"[V4+ Styles]\n"
             f"Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n"
-            f"Style: UserName,{fontname},24,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,2,0,8,40,40,10,1\n"
-            f"Style: CommentText,{fontname},32,&H00FF9933,&H000000FF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,2,0,8,40,40,0,1\n"
-            f"Style: LikeLine,{fontname},24,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,2,0,8,40,40,0,1\n\n"
+            f"Style: UserName,{fontname},32,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,2,0,8,40,40,10,1\n"
+            f"Style: CommentText,{fontname},48,&H00FF9933,&H000000FF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,2,0,8,40,40,30,1\n"
+            f"Style: LikeLine,{fontname},32,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,2,0,8,40,40,30,1\n\n"
             f"[Events]\n"
             f"Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
         )
@@ -250,13 +280,17 @@ class SyntheticVideo:
         def ass_font_mixed(line):
             # 直接使用中文字体
             return line
-        for comment in sorted_comments:
+        # 依次逐条显示评论弹幕，每条16秒
+        base_time = 10.0
+        duration = 16.0
+        for idx, comment in enumerate(sorted_comments):
             author = comment.get("author", "")
             text = comment.get("translated_text", "")
             like_count = comment.get("like_count", 0)
-            # 时间信息
-            start = self._format_ass_time(comment.get("start", 0))
-            end = self._format_ass_time(comment.get("end", 0))
+            start_sec = base_time + idx * duration
+            end_sec = start_sec + duration
+            start = self._format_ass_time(start_sec)
+            end = self._format_ass_time(end_sec)
             # 分行
             lines = split_comment_lines(text)
             ass_mixed = '\\N'.join([ass_font_mixed(line) for line in lines])

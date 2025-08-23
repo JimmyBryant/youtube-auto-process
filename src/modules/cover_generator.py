@@ -108,7 +108,21 @@ def generate_cover_with_ai(
             (255, 105, 180),  # 粉
             (0, 206, 209),    # 青
         ]
-        outline_color = (255, 255, 255)
+        # 默认描边色为白色，黄色/深黄时用黑色
+        def get_outline_color(main_color):
+            # 判断是否为黄/深黄（色调在黄色区间，或RGB接近204,153,0/255,255,0等）
+            yellow_like = [
+                (204,153,0), (255,255,0), (255,215,0), (255,204,0), (255,223,34)
+            ]
+            # 允许一定色差
+            for yc in yellow_like:
+                if sum(abs(a-b) for a,b in zip(main_color,yc)) <= 60:
+                    return (0,0,0)
+            # 也可用色调判断
+            r,g,b = main_color
+            if r > 180 and g > 140 and b < 80:
+                return (0,0,0)
+            return (255,255,255)
         max_width = int(W * 0.92)
         # 分行逻辑：优先按标点符号切分，最多两行，自动调整字体大小适应宽度和高度
         import re
@@ -168,11 +182,12 @@ def generate_cover_with_ai(
             h = font_size
             x = (W - w) // 2
             color = color_list[idx % len(color_list)]
+            outline_color_this = get_outline_color(color)
             # 先描边
             for dx in range(-outline_width, outline_width+1):
                 for dy in range(-outline_width, outline_width+1):
                     if dx != 0 or dy != 0:
-                        draw.text((x+dx, y+dy), line, font=font, fill=outline_color)
+                        draw.text((x+dx, y+dy), line, font=font, fill=outline_color_this)
             # 再主色
             draw.text((x, y), line, font=font, fill=color)
             y += font_size + int(font_size*0.2)

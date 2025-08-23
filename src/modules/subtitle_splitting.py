@@ -27,12 +27,25 @@ def split_srt_file(input_path: Union[str, Path], output_path: Union[str, Path], 
         for seg in parts:
             if not seg:
                 continue
-            buf += seg
             if re.match(end_punct, seg):
-                sents.append(buf.strip())
-                buf = ''
+                # 如果buf非空，先加buf+标点
+                if buf.strip():
+                    sents.append((buf + seg).strip())
+                    buf = ''
+                else:
+                    # 如果buf为空，说明标点单独分割出来，合并到上一句
+                    if sents:
+                        sents[-1] += seg
+                    else:
+                        buf = seg  # 极端情况，句首就是标点
+            else:
+                buf += seg
         if buf.strip():
             sents.append(buf.strip())
+        # 删除只有标点符号的行（包括全角/半角逗号等）
+        def is_only_punct(s):
+            return bool(re.fullmatch(r'[。！？.!?…，,；;、,\s]+', s))
+        sents = [s for s in sents if s.strip() and not is_only_punct(s)]
         # 如果所有分句都不超长，直接返回
         if all(len(s) <= lang_max for s in sents):
             return sents
@@ -54,24 +67,34 @@ def split_srt_file(input_path: Union[str, Path], output_path: Union[str, Path], 
                     mid_buf = ''
             if mid_buf.strip():
                 mid_sents.append(mid_buf.strip())
+            # 删除只有标点符号的行
+            mid_sents = [s for s in mid_sents if s.strip() and not re.fullmatch(r'[。！？.!?…，,；;、,\s]+', s)]
             if all(len(s) <= max_len for s in mid_sents):
                 return mid_sents
-            # 对超长的再按空格优雅切割
+            # 对超长的再按词块优雅切割（不拆数字/字母/连字符/汉字词组）
             result = []
             for s in mid_sents:
                 if len(s) <= max_len:
                     result.append(s)
                 else:
-                    words = s.split(' ')
+                    # 用正则提取词块：数字/字母/连字符/下划线/汉字/其他单字符
+                    # 例如 SU-7轿车、市场、iPhone、2024年
+                    tokens = re.findall(r'[\w\-]+|[\u4e00-\u9fff]+|[^\w\s\-\u4e00-\u9fff]', s)
                     line = ''
-                    for word in words:
+                    prev_is_en = False
+                    for token in tokens:
+                        is_en = bool(re.fullmatch(r'[A-Za-z0-9\-_]+', token))
                         if not line:
-                            line = word
-                        elif len(line) + 1 + len(word) <= max_len:
-                            line += ' ' + word
+                            line = token
+                        elif len(line) + (1 if prev_is_en and is_en else 0) + len(token) <= max_len:
+                            if prev_is_en and is_en:
+                                line += ' ' + token
+                            else:
+                                line += token
                         else:
                             result.append(line)
-                            line = word
+                            line = token
+                        prev_is_en = is_en
                     if line:
                         result.append(line)
             # 兜底：如果还有超长的，硬切
@@ -86,7 +109,14 @@ def split_srt_file(input_path: Union[str, Path], output_path: Union[str, Path], 
         final = []
         for seg in sents:
             final.extend(further_split(seg, lang_max))
-        return final
+        # 合并单字行到前一行
+        merged = []
+        for line in final:
+            if merged and len(line.strip()) == 1:
+                merged[-1] += line.strip()
+            else:
+                merged.append(line)
+        return merged
 
     input_path = Path(input_path)
     output_path = Path(output_path)
@@ -119,6 +149,10 @@ def split_srt_file(input_path: Union[str, Path], output_path: Union[str, Path], 
             time_line = ''
             text = blk[-1].strip() if blk else ''
         split_texts = split_text(text, max_line_length)
+        # 再次过滤，防止极端情况下仍有只有标点的行
+        def is_only_punct_final(s):
+            return bool(re.fullmatch(r'[。！？.!?…，,；;、,\s]+', s))
+        split_texts = [s for s in split_texts if s.strip() and not is_only_punct_final(s)]
         n = len(split_texts)
         # 均分时间轴
         if time_line and '-->' in time_line and n > 0:
