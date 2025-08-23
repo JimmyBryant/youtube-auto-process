@@ -102,46 +102,63 @@ def generate_cover_with_ai(
         logger.info(f"[cover_generator] 封面主字体: {font_path_used}")
 
         color_list = [
+            (204, 153, 0),    # 深黄
             (255, 48, 48),    # 红
-            (255, 215, 0),    # 黄
             (30, 144, 255),   # 蓝
             (255, 105, 180),  # 粉
             (0, 206, 209),    # 青
         ]
         outline_color = (255, 255, 255)
         max_width = int(W * 0.92)
-        # 分行逻辑：优先按标点符号切分，若单行过长再自动分行
+        # 分行逻辑：优先按标点符号切分，最多两行，自动调整字体大小适应宽度和高度
         import re
-        # 中文常用标点
         punc = r'[，。！？；,.!?;]'
-        # 先按标点切分
+        # 先按标点切分，分行时去除标点符号
         raw_lines = re.split(f'({punc})', cover_text)
         lines = []
         buf = ''
         for seg in raw_lines:
-            buf += seg
             if re.match(punc, seg):
-                lines.append(buf)
+                # 遇到标点，当前buf为一句，去除结尾标点
+                if buf:
+                    lines.append(buf)
                 buf = ''
+            else:
+                buf += seg
         if buf.strip():
             lines.append(buf)
-        # 再对每行做宽度限制，超长自动分行
-        final_lines = []
-        for line in lines:
-            chars = list(line)
-            while chars:
-                for i in range(len(chars), 0, -1):
-                    seg = ''.join(chars[:i])
-                    bbox = draw.textbbox((0, 0), seg, font=font)
+        # 合并为最多两行
+        if len(lines) > 2:
+            lines = [lines[0], ''.join(lines[1:])]
+        # 动态调整字体大小
+        def fit_font_size(lines, font_path, max_width, max_height, start_size=110, min_size=40):
+            size = start_size
+            while size >= min_size:
+                try:
+                    font = ImageFont.truetype(font_path, size)
+                except Exception:
+                    font = ImageFont.load_default()
+                total_height = len(lines) * size + (len(lines)-1)*int(size*0.2)
+                too_wide = False
+                for line in lines:
+                    bbox = draw.textbbox((0, 0), line, font=font)
                     w = bbox[2] - bbox[0]
-                    if w <= max_width:
-                        final_lines.append(seg)
-                        chars = chars[i:]
+                    if w > max_width:
+                        too_wide = True
                         break
+                if total_height > max_height or too_wide:
+                    size -= 4
                 else:
-                    final_lines.append(chars[0])
-                    chars = chars[1:]
-        lines = [l for l in final_lines if l.strip()]
+                    return font, size
+            # 最小字号兜底
+            try:
+                font = ImageFont.truetype(font_path, min_size)
+            except Exception:
+                font = ImageFont.load_default()
+            return font, min_size
+        # 计算最大可用高度（上下边距）
+        max_height = int(H * (1 - 2 * margin_ratio))
+        font, font_size = fit_font_size(lines, font_path_used if font_path_used != 'PIL:default' else None, max_width, max_height)
         total_text_height = len(lines) * font_size + (len(lines)-1)*int(font_size*0.2)
         y = int(H * margin_ratio)
         y = max(y, (H - total_text_height)//2)
