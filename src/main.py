@@ -130,9 +130,10 @@ class TaskCLI:
                 "completed": "✅",
                 "failed": "❌"
             }.get(task.status, "❓")
-            
+            # 兼容 ObjectId
+            task_id_str = str(task.id) if task.id is not None else "<None>"
             print(
-                f"{status_icon} [{task.id[:8]}] {task.status.upper()}\n"
+                f"{status_icon} [{task_id_str[:8]}] {task.status.upper()}\n"
                 f"   URL: {task.video_url}\n"
                 f"   优先级: {task.priority} | 创建时间: {task.timestamps['created_at']}\n"
                 f"   {'-'*40}"

@@ -102,8 +102,8 @@ def generate_cover_with_ai(
         logger.info(f"[cover_generator] 封面主字体: {font_path_used}")
 
         color_list = [
-            (253, 219, 31),    # 深黄
             (255, 48, 48),    # 红
+            (253, 219, 31),    # 深黄
             (30, 144, 255),   # 蓝
             (255, 105, 180),  # 粉
             (0, 206, 209),    # 青
