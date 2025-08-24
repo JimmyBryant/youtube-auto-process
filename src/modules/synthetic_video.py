@@ -195,19 +195,27 @@ class SyntheticVideo:
                 ]
                 logger.info(f"[SyntheticVideo] 生成封面头部视频: {' '.join(map(str, cmd_cover))}")
                 subprocess.run(cmd_cover, check=True)
-                # 4. 拼接封面+内容视频（重新编码，保证兼容性）
-                concat_list = self.output_dir / "concat_list.txt"
-                with open(concat_list, "w") as f:
-                    f.write(f"file '{cover_video}'\n")
-                    f.write(f"file '{temp_content_video}'\n")
-                concat_video = self.output_dir / "video_with_cover.mp4"
-                cmd_concat = [
-                    "ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(concat_list),
-                    "-fflags", "+genpts",
-                    "-c:v", "libx264", "-c:a", "aac", str(final_output)
+                # 4. ts流拼接，彻底解决音频提前问题
+                cover_ts = self.output_dir / "cover_head.ts"
+                content_ts = self.output_dir / f"content_{self.video_path.stem}.ts"
+                # 转ts
+                cmd_cover_ts = [
+                    "ffmpeg", "-y", "-i", str(cover_video), "-c", "copy", "-bsf:v", "h264_mp4toannexb", "-f", "mpegts", str(cover_ts)
                 ]
-                logger.info(f"[SyntheticVideo] 拼接封面与内容视频: {' '.join(map(str, cmd_concat))}")
-                subprocess.run(cmd_concat, check=True)
+                cmd_content_ts = [
+                    "ffmpeg", "-y", "-i", str(temp_content_video), "-c", "copy", "-bsf:v", "h264_mp4toannexb", "-f", "mpegts", str(content_ts)
+                ]
+                logger.info(f"[SyntheticVideo] 转封面为ts: {' '.join(map(str, cmd_cover_ts))}")
+                subprocess.run(cmd_cover_ts, check=True)
+                logger.info(f"[SyntheticVideo] 转内容为ts: {' '.join(map(str, cmd_content_ts))}")
+                subprocess.run(cmd_content_ts, check=True)
+                # 拼接ts
+                concat_ts = f"concat:{cover_ts}|{content_ts}"
+                cmd_concat_ts = [
+                    "ffmpeg", "-y", "-i", concat_ts, "-c", "copy", "-bsf:a", "aac_adtstoasc", str(final_output)
+                ]
+                logger.info(f"[SyntheticVideo] ts拼接封面与内容: {' '.join(map(str, cmd_concat_ts))}")
+                subprocess.run(cmd_concat_ts, check=True)
             else:
                 # 无封面，直接输出内容视频
                 final_output = temp_content_video
@@ -259,7 +267,7 @@ class SyntheticVideo:
             f"[V4+ Styles]\n"
             f"Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n"
             f"Style: UserName,{fontname},32,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,2,0,8,40,40,10,1\n"
-            f"Style: CommentText,{fontname},48,&H00FF9933,&H000000FF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,2,0,8,40,40,30,1\n"
+            f"Style: CommentText,{fontname},56,&H00FF9933,&H000000FF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,2,0,8,40,40,30,1\n"
             f"Style: LikeLine,{fontname},32,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,2,0,8,40,40,30,1\n\n"
             f"[Events]\n"
             f"Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
@@ -267,24 +275,27 @@ class SyntheticVideo:
         # 只加载有点赞数的评论，按点赞数从高到低排序
         sorted_comments = sorted([c for c in self.comments if c.get("like_count", 0) > 0], key=lambda c: c.get("like_count", 0), reverse=True)
         ass_events = []
-        def split_comment_lines(text, zh_len=zh_len, en_len=en_len):
+        def split_comment_lines(text, fontname=fontname, fontsize=56, max_width_px=max_width_px):
             """
-            自动分行：汉字每行zh_len，英文每行en_len。宽度约为视频宽度的80%。
-            可通过comment_style自定义。
+            自动分行：每行ASS文本宽度不超过max_width_px（视频宽度80%）。
             """
+            from PIL import ImageFont, Image
+            try:
+                font = ImageFont.truetype(fontname, fontsize)
+            except Exception:
+                font = ImageFont.load_default()
             lines = []
             buf = ''
-            count = 0
             for ch in text:
-                if '\u4e00' <= ch <= '\u9fff':
-                    count += 2
-                else:
-                    count += 1
-                buf += ch
-                if (count >= zh_len*2) or (not ('\u4e00' <= ch <= '\u9fff') and count >= en_len):
+                test = buf + ch
+                # 用PIL测宽
+                dummy_img = Image.new('RGB', (10, 10))
+                w = font.getlength(test) if hasattr(font, 'getlength') else font.getsize(test)[0]
+                if w > max_width_px and buf:
                     lines.append(buf)
-                    buf = ''
-                    count = 0
+                    buf = ch
+                else:
+                    buf = test
             if buf:
                 lines.append(buf)
             return lines

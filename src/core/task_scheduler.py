@@ -464,6 +464,16 @@ class TaskScheduler:
             from src.modules.cover_generator import generate_cover_with_ai
             original_cover_path = Path(download_progress.output_files["thumbnail_path"])
             translated_title = translate_progress.output_files.get("translated_video_title", "")
+            # 若翻译后标题为空，则调用大模型服务再翻译一次
+            if not translated_title or not str(translated_title).strip():
+                video_title = download_progress.output_files.get("video_title", "")
+                if not video_title or not str(video_title).strip():
+                    raise RuntimeError("原始视频标题为空，无法生成封面")
+                # 用大模型服务再翻译一次
+                from src.services.openai_service import OpenAIService
+                service = OpenAIService()
+                translated_title = service.translate_text(video_title, target_lang="zh")
+                logger.info(f"[cover_generating] 大模型补充翻译标题: {translated_title}")
             output_path = task_dir / "cover_with_title.png"
             generate_cover_with_ai(
                 original_cover_path=original_cover_path,

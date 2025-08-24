@@ -27,6 +27,8 @@ def generate_cover_with_ai(
     """
     logger = logging.getLogger("cover_generator")
     try:
+        if not title or not str(title).strip():
+            raise ValueError("封面标题(title)不能为空！")
         # 1. 用OpenAI生成封面文案
         service = OpenAIService()
         cover_text = service.generate_text(title)
@@ -102,50 +104,67 @@ def generate_cover_with_ai(
         logger.info(f"[cover_generator] 封面主字体: {font_path_used}")
 
         color_list = [
-            (255, 48, 48),    # 红
-            (253, 219, 31),    # 深黄
+            (239, 69, 55),    # 红 #ef4537
+            (253, 237, 0),    # 黄 #fded00
             (30, 144, 255),   # 蓝
             (255, 105, 180),  # 粉
             (0, 206, 209),    # 青
         ]
         # 默认描边色为白色，黄色/深黄时用黑色
         def get_outline_color(main_color):
-            # 判断是否为黄/深黄（色调在黄色区间，或RGB接近204,153,0/255,255,0等）
+            # 判断是否为黄/深黄（色调在黄色区间，或RGB接近253,237,0等）
             yellow_like = [
-                (253,219,31), (255,255,0), (255,215,0), (255,204,0), (255,223,34)
+                (253,237,0), (255,255,0), (255,215,0), (255,204,0), (255,223,34)
             ]
-            # 允许一定色差
             for yc in yellow_like:
                 if sum(abs(a-b) for a,b in zip(main_color,yc)) <= 60:
                     return (0,0,0)
-            # 也可用色调判断
             r,g,b = main_color
             if r > 180 and g > 140 and b < 80:
                 return (0,0,0)
             return (255,255,255)
-        max_width = int(W * 0.92)
-        # 分行逻辑：优先按标点符号切分，最多两行，自动调整字体大小适应宽度和高度
+        max_width = int(W * 0.8)
         import re
         punc = r'[，。！？；,.!?;]'
-        # 先按标点切分，分行时去除标点符号
+        # 先按标点切分为短句
         raw_lines = re.split(f'({punc})', cover_text)
-        lines = []
+        segs = []
         buf = ''
         for seg in raw_lines:
             if re.match(punc, seg):
-                # 遇到标点，当前buf为一句，去除结尾标点
                 if buf:
-                    lines.append(buf)
+                    segs.append(buf)
                 buf = ''
             else:
                 buf += seg
         if buf.strip():
-            lines.append(buf)
-        # 合并为最多两行
-        if len(lines) > 2:
-            lines = [lines[0], ''.join(lines[1:])]
-        # 动态调整字体大小
-        def fit_font_size(lines, font_path, max_width, max_height, start_size=110, min_size=40):
+            segs.append(buf)
+        # 组装多行，保证每行宽度不超过max_width，最多三行
+        lines = []
+        cur = ''
+        for s in segs:
+            test = cur + s
+            # 用最大字号临时测宽
+            try:
+                test_font = ImageFont.truetype(font_path_used if font_path_used != 'PIL:default' else None, 180)
+            except Exception:
+                test_font = ImageFont.load_default()
+            bbox = draw.textbbox((0, 0), test, font=test_font)
+            w = bbox[2] - bbox[0]
+            if w > max_width and cur:
+                lines.append(cur)
+                cur = s
+                if len(lines) >= 2:  # 最多三行
+                    break
+            else:
+                cur = test
+        if cur and len(lines) < 3:
+            lines.append(cur)
+        # 若还有剩余内容，拼到最后一行
+        if len(lines) == 3 and sum(len(x) for x in segs) > sum(len(x) for x in lines):
+            lines[-1] += '...'
+        # 动态调整字体大小（更大更粗，最大起始字号150，最小60）
+        def fit_font_size(lines, font_path, max_width, max_height, start_size=150, min_size=60):
             size = start_size
             while size >= min_size:
                 try:
@@ -164,7 +183,6 @@ def generate_cover_with_ai(
                     size -= 4
                 else:
                     return font, size
-            # 最小字号兜底
             try:
                 font = ImageFont.truetype(font_path, min_size)
             except Exception:
