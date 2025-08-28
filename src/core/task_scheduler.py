@@ -41,7 +41,7 @@ class TaskScheduler:
             self.stage_handlers = {
                 TaskStage.DOWNLOADING: lambda task, task_dir: self._handle_downloading(task, task_dir),
                 TaskStage.TRANSCRIBING: lambda task, task_dir: self._handle_transcribing(task),
-                TaskStage.TRANSLATING: lambda task, task_dir: self._handle_translating(task),
+                TaskStage.SUBTITLE_TRANSLATING: lambda task, task_dir: self._handle_subtitle_translating(task),
                 TaskStage.SUBTITLE_SPLITTING: lambda task, task_dir: self._handle_subtitle_splitting(task),
                 TaskStage.COMMENT_FETCHING: lambda task, task_dir: self._handle_comment_fetching(task, task_dir),
                 TaskStage.COMMENT_TRANSLATING: lambda task, task_dir: self._handle_comment_translating(task, task_dir),
@@ -54,7 +54,7 @@ class TaskScheduler:
             self.stage_sequence = [
                 TaskStage.DOWNLOADING,
                 TaskStage.TRANSCRIBING,
-                TaskStage.TRANSLATING,
+                TaskStage.SUBTITLE_TRANSLATING,
                 TaskStage.SUBTITLE_SPLITTING,
                 TaskStage.COMMENT_FETCHING,
                 TaskStage.COMMENT_TRANSLATING,
@@ -255,52 +255,44 @@ class TaskScheduler:
             )
             return False, {}
 
-    async def _handle_translating(self, task: TaskModel) -> Tuple[bool, Dict[str, str]]:
-        """处理字幕翻译阶段，同时翻译视频标题和简介，支持多家大语言模型API，目标语言和API KEY通过环境变量配置，自动分段翻译"""
-        logger.info(f"🌐🌐 Handling translating for task {task.id}")
+    async def _handle_subtitle_translating(self, task: TaskModel) -> Tuple[bool, Dict[str, str]]:
+        """处理字幕翻译阶段，仅翻译字幕文件，支持多家大语言模型API，目标语言和API KEY通过环境变量配置，自动分段翻译"""
+        logger.info(f"🌐🌐 Handling subtitle translating for task {task.id}")
 
-        stage_progress = task.stage_progress.get(TaskStage.TRANSLATING.value)
+        stage_progress = task.stage_progress.get(TaskStage.SUBTITLE_TRANSLATING.value)
         if stage_progress and stage_progress.status == StageStatus.COMPLETED:
-            logger.info(f"⏩⏩⏩ Skipping already completed translating for task {task.id}")
+            logger.info(f"⏩⏩⏩ Skipping already completed subtitle translating for task {task.id}")
             return True, stage_progress.output_files
 
         # 检查前置阶段是否完成
         transcribe_progress = task.stage_progress.get(TaskStage.TRANSCRIBING.value)
         download_progress = task.stage_progress.get(TaskStage.DOWNLOADING.value)
         if not transcribe_progress or transcribe_progress.status != StageStatus.COMPLETED:
-            raise RuntimeError(f"Transcribing not completed for task {task.id}, can't translate")
+            raise RuntimeError(f"Transcribing not completed for task {task.id}, can't translate subtitle")
         if not download_progress or download_progress.status != StageStatus.COMPLETED:
-            raise RuntimeError(f"Downloading not completed for task {task.id}, can't translate title/desc")
+            raise RuntimeError(f"Downloading not completed for task {task.id}, can't translate subtitle")
 
         try:
             await self.task_manager.update_stage_status(
                 task_id=task.id,
-                stage=TaskStage.TRANSLATING,
+                stage=TaskStage.SUBTITLE_TRANSLATING,
                 status=StageStatus.PROCESSING
             )
 
             subtitle_path = Path(transcribe_progress.output_files["subtitle_path"])
             # 使用 TranslationService 类进行翻译
             translation_service = TranslationService()
-            # 翻译字幕
+            # 只翻译字幕
             translated_srt_path = await translation_service.translate_subtitle(subtitle_path)
-
-            # 翻译视频标题和简介
-            video_title = download_progress.output_files.get("video_title", "")
-            video_desc = download_progress.output_files.get("video_desc", "")
-            translated_title, translated_desc = await translation_service.translate_title_and_desc(video_title, video_desc)
-
             outputs = {
-                "translated_subtitle_path": str(translated_srt_path),
-                "translated_video_title": translated_title,
-                "translated_video_desc": translated_desc
+                "translated_subtitle_path": str(translated_srt_path)
             }
             return True, outputs
         except Exception as e:
-            logger.error(f"❌❌ Translating failed for task {task.id}: {str(e)}")
+            logger.error(f"❌❌ Subtitle translating failed for task {task.id}: {str(e)}")
             await self.task_manager.update_stage_status(
                 task_id=task.id,
-                stage=TaskStage.TRANSLATING,
+                stage=TaskStage.SUBTITLE_TRANSLATING,
                 status=StageStatus.FAILED,
                 error=str(e)
             )
@@ -316,11 +308,11 @@ class TaskScheduler:
 
         # 检查前置阶段
         transcribe_progress = task.stage_progress.get(TaskStage.TRANSCRIBING.value)
-        translate_progress = task.stage_progress.get(TaskStage.TRANSLATING.value)
+        translate_progress = task.stage_progress.get(TaskStage.SUBTITLE_TRANSLATING.value)
         if not transcribe_progress or transcribe_progress.status != StageStatus.COMPLETED:
             raise RuntimeError(f"Transcribing not completed for task {task.id}, can't split subtitles")
         if not translate_progress or translate_progress.status != StageStatus.COMPLETED:
-            raise RuntimeError(f"Translating not completed for task {task.id}, can't split subtitles")
+            raise RuntimeError(f"Subtitle translating not completed for task {task.id}, can't split subtitles")
 
         try:
             await self.task_manager.update_stage_status(
@@ -448,11 +440,11 @@ class TaskScheduler:
 
         # 检查前置阶段
         download_progress = task.stage_progress.get(TaskStage.DOWNLOADING.value)
-        translate_progress = task.stage_progress.get(TaskStage.TRANSLATING.value)
+        translate_progress = task.stage_progress.get(TaskStage.SUBTITLE_TRANSLATING.value)
         if not download_progress or download_progress.status != StageStatus.COMPLETED:
             raise RuntimeError(f"Downloading not completed for task {task.id}, can't generate cover")
         if not translate_progress or translate_progress.status != StageStatus.COMPLETED:
-            raise RuntimeError(f"Translating not completed for task {task.id}, can't generate cover")
+            raise RuntimeError(f"Subtitle translating not completed for task {task.id}, can't generate cover")
 
         try:
             await self.task_manager.update_stage_status(
@@ -463,24 +455,26 @@ class TaskScheduler:
 
             from src.modules.cover_generator import generate_cover_with_ai
             original_cover_path = Path(download_progress.output_files["thumbnail_path"])
-            translated_title = translate_progress.output_files.get("translated_video_title", "")
-            # 若翻译后标题为空，则调用大模型服务再翻译一次
+            # 生成封面时再翻译title和desc
+            video_title = download_progress.output_files.get("video_title", "")
+            video_desc = download_progress.output_files.get("video_desc", "")
+            if not video_title or not str(video_title).strip():
+                raise RuntimeError("原始视频标题为空，无法生成封面")
+            translation_service = TranslationService()
+            translated_title, translated_desc = await translation_service.translate_title_and_desc(video_title, video_desc)
             if not translated_title or not str(translated_title).strip():
-                video_title = download_progress.output_files.get("video_title", "")
-                if not video_title or not str(video_title).strip():
-                    raise RuntimeError("原始视频标题为空，无法生成封面")
-                # 用大模型服务再翻译一次
-                from src.services.openai_service import OpenAIService
-                service = OpenAIService()
-                translated_title = service.translate_text(video_title, target_lang="zh")
-                logger.info(f"[cover_generating] 大模型补充翻译标题: {translated_title}")
+                raise RuntimeError("翻译后标题为空，无法生成封面")
             output_path = task_dir / "cover_with_title.png"
             generate_cover_with_ai(
                 original_cover_path=original_cover_path,
                 title=translated_title,
                 output_path=output_path
             )
-            outputs = {"cover_with_title_path": str(output_path)}
+            outputs = {
+                "cover_with_title_path": str(output_path),
+                "translated_video_title": translated_title,
+                "translated_video_desc": translated_desc
+            }
             logger.info(f"新封面图片生成完成: {output_path}")
             return True, outputs
         except Exception as e:
@@ -503,7 +497,7 @@ class TaskScheduler:
         # 检查前置阶段是否完成
         required_stages = [
             (TaskStage.DOWNLOADING, "Downloading"),
-            (TaskStage.TRANSLATING, "Translating"),
+            (TaskStage.SUBTITLE_TRANSLATING, "Subtitle translating"),
             (TaskStage.SUBTITLE_SPLITTING, "Subtitle splitting"),
             (TaskStage.COMMENT_TRANSLATING, "Comment translating")
         ]
@@ -521,7 +515,7 @@ class TaskScheduler:
             logger.info("设置合成视频阶段状态为 PROCESSING")
             # 获取所需文件路径
             download_progress = task.stage_progress.get(TaskStage.DOWNLOADING)
-            translate_progress = task.stage_progress.get(TaskStage.TRANSLATING)
+            translate_progress = task.stage_progress.get(TaskStage.SUBTITLE_TRANSLATING)
             split_progress = task.stage_progress.get(TaskStage.SUBTITLE_SPLITTING)
 
             video_path = Path(download_progress.output_files["video_path"])

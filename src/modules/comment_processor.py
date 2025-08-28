@@ -280,13 +280,17 @@ async def translate_comments(video_url: str, target_lang: str = 'zh') -> int:
 
         # 5. 通过TaskManager批量更新翻译结果
         modified_count = await task_manager.update_comments_translation(comments)
-        
-        # 确保 modified_count 是整数
         if not isinstance(modified_count, int):
-            modified_count = int(modified_count)  # 强制转换为整数
-        
+            modified_count = int(modified_count)
         logger.info(f"数据库更新完成，受影响记录: {modified_count}/{len(comments)}")
-        return modified_count  # 确保返回整数
+
+        # 再次检查所有评论是否都已翻译
+        untranslated = [c for c in comments if not c.get('translated_text') or c.get('translated_text') == c.get('text', '') and not is_chinese(c.get('text', ''))]
+        if untranslated:
+            logger.error(f"仍有{len(untranslated)}条评论未成功翻译，任务需重试！")
+            raise RuntimeError(f"{len(untranslated)}条评论未成功翻译，等待重试")
+
+        return modified_count
         
     except Exception as e:
         logger.error(f"评论翻译流程异常: {str(e)}", exc_info=True)

@@ -25,7 +25,7 @@ class TaskStage(str, Enum):
     """任务阶段枚举"""
     DOWNLOADING = "downloading"
     TRANSCRIBING = "transcribing"
-    TRANSLATING = "translating"
+    SUBTITLE_TRANSLATING = "subtitle_translating"
     SUBTITLE_SPLITTING = "subtitle_splitting"
     COMMENT_FETCHING = "comment_fetching"
     COMMENT_TRANSLATING = "comment_translating"
