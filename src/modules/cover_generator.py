@@ -4,7 +4,6 @@ from PIL import Image, ImageDraw, ImageFont
 import logging
 import os
 from src.services.openai_service import OpenAIService
-import random
 
 
 """
@@ -17,7 +16,7 @@ def generate_cover_with_ai(
     title: str,
     output_path: Path,
     font_path: str = None,
-    font_size: int = 110,
+    font_size: int = 110,  # 入口参数不变，实际fit_font_size会动态更大
     outline_color: str = "white",
     outline_width: int = 4,
     margin_ratio: float = 0.08,
@@ -29,10 +28,10 @@ def generate_cover_with_ai(
     try:
         if not title or not str(title).strip():
             raise ValueError("封面标题(title)不能为空！")
-        # 1. 用OpenAI生成封面文案
+        # 1. 用OpenAI生成多行封面文案
         service = OpenAIService()
-        cover_text = service.generate_text(title)
-        logger.info(f"[cover_generator] AI生成封面文案: {cover_text}")
+        cover_lines = service.generate_cover_title(title)
+        logger.info(f"[cover_generator] AI生成封面文案: {cover_lines}")
 
         img = Image.open(original_cover_path).convert("RGBA")
         draw = ImageDraw.Draw(img)
@@ -104,7 +103,7 @@ def generate_cover_with_ai(
         logger.info(f"[cover_generator] 封面主字体: {font_path_used}")
 
         color_list = [
-            (239, 69, 55),    # 红 #ef4537
+            (253, 0, 5),    # 红 #ef4537
             (253, 237, 0),    # 黄 #fded00
             (30, 144, 255),   # 蓝
             (255, 105, 180),  # 粉
@@ -124,47 +123,14 @@ def generate_cover_with_ai(
                 return (0,0,0)
             return (255,255,255)
         max_width = int(W * 0.8)
-        import re
-        punc = r'[，。！？；,.!?;]'
-        # 先按标点切分为短句
-        raw_lines = re.split(f'({punc})', cover_text)
-        segs = []
-        buf = ''
-        for seg in raw_lines:
-            if re.match(punc, seg):
-                if buf:
-                    segs.append(buf)
-                buf = ''
-            else:
-                buf += seg
-        if buf.strip():
-            segs.append(buf)
-        # 组装多行，保证每行宽度不超过max_width，最多三行
-        lines = []
-        cur = ''
-        for s in segs:
-            test = cur + s
-            # 用最大字号临时测宽
-            try:
-                test_font = ImageFont.truetype(font_path_used if font_path_used != 'PIL:default' else None, 180)
-            except Exception:
-                test_font = ImageFont.load_default()
-            bbox = draw.textbbox((0, 0), test, font=test_font)
-            w = bbox[2] - bbox[0]
-            if w > max_width and cur:
-                lines.append(cur)
-                cur = s
-                if len(lines) >= 2:  # 最多三行
-                    break
-            else:
-                cur = test
-        if cur and len(lines) < 3:
-            lines.append(cur)
-        # 若还有剩余内容，拼到最后一行
-        if len(lines) == 3 and sum(len(x) for x in segs) > sum(len(x) for x in lines):
-            lines[-1] += '...'
-        # 动态调整字体大小（更大更粗，最大起始字号150，最小60）
-        def fit_font_size(lines, font_path, max_width, max_height, start_size=150, min_size=60):
+
+        # 直接用AI返回的多行标题
+        lines = [line for line in cover_lines if line.strip()][:3]
+
+        # 动态调整字体大小（更大更粗，最大起始字号240，最小60），行数越少字号越大
+        def fit_font_size(lines, font_path, max_width, max_height, min_size=60):
+            # 行数越少，允许更大字号
+            start_size = 240 if len(lines) == 1 else (180 if len(lines) == 2 else 140)
             size = start_size
             while size >= min_size:
                 try:
